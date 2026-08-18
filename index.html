@@ -1,0 +1,2294 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FITFORGE — AI Workout Planner</title>
+<meta name="description" content="ผู้ช่วยวางแผนออกกำลังกายส่วนบุคคล คำนวณ BMI เลือกท่าออกกำลังกายตามเป้าหมาย ระดับ อุปกรณ์ที่มี พร้อมโหมดออกกำลังกายแบบมีไกด์ ตัวจับเวลา และติดตามความก้าวหน้า" />
+
+<!--
+  Standalone, no-build export of the FITFORGE app. Runs entirely client-side:
+  React + ReactDOM (UMD builds) and Babel Standalone load from cdnjs.cloudflare.com,
+  then a small bootstrap script (bottom of page) transpiles the JSX below with the
+  classic runtime and runs it — no import maps, no ES module resolution needed, so
+  this works both on GitHub Pages and inside restrictive iframe/CSP preview contexts.
+  Data is saved to this browser's localStorage only; nothing is sent to any server.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/plain" id="fitforge-source">
+// This file is written to run WITHOUT a bundler: React/ReactDOM are loaded globally
+// via <script> tags (see the HTML wrapper), so we just destructure from them here
+// instead of using ES `import`. Icons and charts below are hand-rolled (no
+// lucide-react / recharts dependency) so the whole app needs only 3 external
+// scripts total: React, ReactDOM, and Babel Standalone (all from cdnjs.cloudflare.com).
+const { useState, useEffect, useMemo, useCallback } = React;
+const { createRoot } = ReactDOM;
+
+// ===================== window.storage POLYFILL (standalone build) =====================
+// The Claude.ai artifact version gets window.storage for free from the platform —
+// private, per-account key/value storage. A plain static page has no such backend,
+// so this polyfill gives the exact same async get/set/delete/list interface but
+// backed by the browser's own localStorage (data stays only on this device/browser).
+(function installStoragePolyfill() {
+  const PREFIX = "fitforge:";
+  window.storage = {
+    async get(key, shared) {
+      const raw = localStorage.getItem(PREFIX + key);
+      if (raw === null) throw new Error("key not found: " + key);
+      return { key, value: raw, shared: !!shared };
+    },
+    async set(key, value, shared) {
+      localStorage.setItem(PREFIX + key, value);
+      return { key, value, shared: !!shared };
+    },
+    async delete(key, shared) {
+      localStorage.removeItem(PREFIX + key);
+      return { key, deleted: true, shared: !!shared };
+    },
+    async list(prefix, shared) {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(PREFIX + (prefix || ""))) keys.push(k.slice(PREFIX.length));
+      }
+      return { keys, prefix, shared: !!shared };
+    },
+  };
+})();
+
+
+// ===================== HAND-ROLLED ICON SET (replaces lucide-react) =====================
+// Simple, consistent line-art icons. Not pixel-identical to lucide's designs, but
+// same calling convention (size/color props) so no other code needed to change.
+function IconBase({ children, size = 24, color, style, className, filled }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? (color || "currentColor") : "none"}
+      stroke={color || "currentColor"} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      style={style} className={className}>
+      {children}
+    </svg>
+  );
+}
+function Home(p) { return <IconBase {...p}><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /><path d="M9 20v-6h6v6" /></IconBase>; }
+function User(p) { return <IconBase {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" /></IconBase>; }
+function SlidersHorizontal(p) { return <IconBase {...p}><line x1="4" y1="7" x2="20" y2="7" /><circle cx="9" cy="7" r="2" fill="currentColor" /><line x1="4" y1="14" x2="20" y2="14" /><circle cx="16" cy="14" r="2" fill="currentColor" /><line x1="4" y1="19" x2="20" y2="19" /><circle cx="11" cy="19" r="2" fill="currentColor" /></IconBase>; }
+function Sparkles(p) { return <IconBase {...p} filled><path d="M12 2l1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8z" /><path d="M19 15l0.8 2.2L22 18l-2.2 0.8L19 21l-0.8-2.2L16 18l2.2-0.8z" /></IconBase>; }
+function CalendarDays(p) { return <IconBase {...p}><rect x="3" y="5" width="18" height="16" rx="2" /><line x1="3" y1="10" x2="21" y2="10" /><line x1="8" y1="3" x2="8" y2="7" /><line x1="16" y1="3" x2="16" y2="7" /></IconBase>; }
+function TrendingUp(p) { return <IconBase {...p}><polyline points="3,17 9,11 13,15 21,6" /><polyline points="15,6 21,6 21,12" /></IconBase>; }
+function Dumbbell(p) { return <IconBase {...p}><line x1="4" y1="12" x2="20" y2="12" /><rect x="2" y="9" width="4" height="6" rx="1" /><rect x="18" y="9" width="4" height="6" rx="1" /></IconBase>; }
+function Flame(p) { return <IconBase {...p}><path d="M12 2c2 3-2 4-2 8a4 4 0 008 0c0-2-1-3-1-3s1 4-2 4-2-3-1-5c-2 0-4 2-4 6a6 6 0 0012 0c0-6-6-6-10-10z" /></IconBase>; }
+function Zap(p) { return <IconBase {...p} filled><path d="M13 2L4 14h6l-1 8 9-12h-6z" /></IconBase>; }
+function HeartPulse(p) { return <IconBase {...p}><path d="M12 20s-7-4.5-9.5-9C1 7.5 3 4 6.5 4c2 0 3.5 1.5 4 2.5.5-1 2-2.5 4-2.5C18 4 20 7.5 20 8" /><polyline points="3,12 8,12 10,8 13,16 15,12 21,12" /></IconBase>; }
+function Target(p) { return <IconBase {...p}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="0.7" fill="currentColor" /></IconBase>; }
+function Ruler(p) { return <IconBase {...p}><rect x="2.5" y="7" width="19" height="10" rx="1" /><line x1="7" y1="7" x2="7" y2="10" /><line x1="11" y1="7" x2="11" y2="10" /><line x1="15" y1="7" x2="15" y2="10" /><line x1="19" y1="7" x2="19" y2="10" /></IconBase>; }
+function Weight(p) { return <IconBase {...p}><circle cx="12" cy="12" r="9" /><line x1="6" y1="12" x2="18" y2="12" /></IconBase>; }
+function CheckCircle2(p) { return <IconBase {...p}><circle cx="12" cy="12" r="9" /><polyline points="8,12.5 11,15.5 16,9" /></IconBase>; }
+function AlertTriangle(p) { return <IconBase {...p}><path d="M12 3l10 18H2z" /><line x1="12" y1="9" x2="12" y2="14" /><circle cx="12" cy="17.2" r="0.8" fill="currentColor" /></IconBase>; }
+function ChevronRight(p) { return <IconBase {...p}><polyline points="9,5 16,12 9,19" /></IconBase>; }
+function ChevronDown(p) { return <IconBase {...p}><polyline points="5,9 12,16 19,9" /></IconBase>; }
+function ChevronUp(p) { return <IconBase {...p}><polyline points="5,15 12,8 19,15" /></IconBase>; }
+function Play(p) { return <IconBase {...p} filled><polygon points="6,4 20,12 6,20" /></IconBase>; }
+function Save(p) { return <IconBase {...p}><path d="M5 3h11l3 3v15H5z" /><rect x="8" y="3" width="6" height="5" /><rect x="7" y="13" width="10" height="7" /></IconBase>; }
+function RotateCcw(p) { return <IconBase {...p}><path d="M3 11a9 9 0 1 1 2.2 6.4" /><polyline points="3,4 3,11 10,11" /></IconBase>; }
+function Info(p) { return <IconBase {...p}><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16.5" /><circle cx="12" cy="7.5" r="0.9" fill="currentColor" /></IconBase>; }
+function ExternalLink(p) { return <IconBase {...p}><path d="M9 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-4" /><polyline points="14,3 21,3 21,10" /><line x1="10" y1="14" x2="21" y2="3" /></IconBase>; }
+function Loader2(p) { return <IconBase {...p}><path d="M12 3a9 9 0 1 0 9 9" /></IconBase>; }
+function Plus(p) { return <IconBase {...p}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></IconBase>; }
+function ClipboardList(p) { return <IconBase {...p}><rect x="5" y="4" width="14" height="17" rx="2" /><rect x="9" y="2.5" width="6" height="3" rx="1" /><line x1="8" y1="11" x2="16" y2="11" /><line x1="8" y1="15" x2="16" y2="15" /></IconBase>; }
+function Clock(p) { return <IconBase {...p}><circle cx="12" cy="12" r="9" /><polyline points="12,7 12,12 16,14" /></IconBase>; }
+function ShieldAlert(p) { return <IconBase {...p}><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /><line x1="12" y1="8" x2="12" y2="13" /><circle cx="12" cy="16" r="0.8" fill="currentColor" /></IconBase>; }
+function ImageIcon(p) { return <IconBase {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.8" /><polyline points="4,18 9,13 13,17 16,14 20,18" /></IconBase>; }
+function Wrench(p) { return <IconBase {...p}><path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.7 2.7-2-2z" /></IconBase>; }
+function X(p) { return <IconBase {...p}><line x1="5" y1="5" x2="19" y2="19" /><line x1="19" y1="5" x2="5" y2="19" /></IconBase>; }
+function Trophy(p) { return <IconBase {...p}><path d="M7 4h10v5a5 5 0 01-10 0z" /><path d="M7 5H4a3 3 0 003 5" /><path d="M17 5h3a3 3 0 01-3 5" /><line x1="12" y1="14" x2="12" y2="18" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="9" y1="18" x2="15" y2="18" /></IconBase>; }
+function SkipForward(p) { return <IconBase {...p} filled><polygon points="5,4 15,12 5,20" /><line x1="19" y1="4" x2="19" y2="20" strokeWidth="2" /></IconBase>; }
+function Repeat(p) { return <IconBase {...p}><path d="M4 7h13l-3-3" /><path d="M4 7l3 3" /><path d="M20 17H7l3 3" /><path d="M20 17l-3-3" /></IconBase>; }
+function Minus(p) { return <IconBase {...p}><line x1="5" y1="12" x2="19" y2="12" /></IconBase>; }
+
+// ===================== SIMPLE LINE CHART (replaces recharts LineChart) =====================
+// Minimal SVG line chart: takes {data, dataKey, xKey, color}. No axes library needed —
+// just enough to show a weight trend with a couple of labeled points.
+function SimpleLineChart({ data, dataKey, xKey = "date", color = "var(--accent)", height = 220 }) {
+  if (!data || data.length < 2) return null;
+  const width = 600;
+  const pad = { l: 34, r: 12, t: 14, b: 26 };
+  const values = data.map((d) => Number(d[dataKey]));
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = max - min || 1;
+  const yFor = (v) => pad.t + (1 - (v - min) / span) * (height - pad.t - pad.b);
+  const xFor = (i) => pad.l + (i / (data.length - 1)) * (width - pad.l - pad.r);
+  const points = data.map((d, i) => `${xFor(i)},${yFor(Number(d[dataKey]))}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height }} preserveAspectRatio="none">
+      <line x1={pad.l} y1={pad.t} x2={pad.l} y2={height - pad.b} stroke="var(--border-soft)" />
+      <line x1={pad.l} y1={height - pad.b} x2={width - pad.r} y2={height - pad.b} stroke="var(--border-soft)" />
+      <text x={4} y={yFor(max) + 4} fontSize="11" fill="var(--text-mute)">{max}</text>
+      <text x={4} y={yFor(min) + 4} fontSize="11" fill="var(--text-mute)">{min}</text>
+      <polyline points={points} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+      {data.map((d, i) => <circle key={i} cx={xFor(i)} cy={yFor(Number(d[dataKey]))} r="3.5" fill={color} />)}
+      <text x={pad.l} y={height - 6} fontSize="11" fill="var(--text-mute)">{data[0][xKey]}</text>
+      <text x={width - pad.r} y={height - 6} fontSize="11" fill="var(--text-mute)" textAnchor="end">{data[data.length - 1][xKey]}</text>
+    </svg>
+  );
+}
+
+
+/* =====================================================================================
+   FITFORGE — AI-Personalized Workout Planner
+   - Exercise selection & set/rep/rest numbers are computed deterministically from a
+     curated, source-cited database (never left to free-form AI generation).
+   - The AI call (Claude Sonnet) is used ONLY to (a) choose which exercises from an
+     already-vetted, per-day candidate list to use, and (b) write the personalized
+     rationale / coaching notes. Its exerciseId output is re-validated against the
+     candidate list before being trusted, so it can never invent an exercise.
+   ===================================================================================== */
+// ===================== REFERENCE SOURCES (real, verified URLs) =====================
+const SOURCES = [
+  { id: "ace", name: "American Council on Exercise (ACE) — Exercise Library", url: "https://www.acefitness.org/resources/everyone/exercise-library/" },
+  { id: "nasm", name: "NASM Blog — Hypertrophy & Strength Training Variables", url: "https://blog.nasm.org/sports-performance/defining-muscular-hypertrophy-and-training-growth-best-practices" },
+  { id: "mayo1", name: "Mayo Clinic — Weight training: Do's and don'ts", url: "https://www.mayoclinic.org/healthy-lifestyle/fitness/in-depth/weight-training/art-20045842" },
+  { id: "mayo2", name: "Mayo Clinic — Strength training: Get stronger, leaner, healthier", url: "https://www.mayoclinic.org/healthy-lifestyle/fitness/in-depth/strength-training/art-20046670" },
+  { id: "nhs", name: "NHS — How to improve your strength and flexibility", url: "https://www.nhs.uk/live-well/exercise/how-to-improve-strength-flexibility/" },
+  { id: "acsm", name: "ACSM — Resistance Training Guidelines (2026 update)", url: "https://acsm.org/resistance-training-guidelines-update-2026/" },
+  { id: "who", name: "WHO Expert Consultation — Asia-Pacific BMI classification (The Lancet, 2004)", url: "https://www.who.int/news-room/questions-and-answers/item/bmi-body-mass-index" },
+];
+
+// ===================== EXERCISE DATABASE =====================
+// Each exercise cites either a specific ACE exercise page (when verified) or the
+// relevant ACE body-part category page (always verified/real — never fabricated).
+const EXERCISES = [
+  // ---------- CHEST ----------
+  { id: "ch01", name: "วิดพื้นเข่าแตะพื้น (Bent-Knee Push-up)", part: "chest", difficulty: "beginner", pattern: "push", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "หน้าอก, ไหล่ด้านหน้า, ต้นแขนหลัง",
+    how: ["คุกเข่าลงบนเสื่อ วางมือกว้างกว่าหัวไหล่เล็กน้อย", "เกร็งลำตัวให้ลำตัวเป็นเส้นตรงจากศีรษะถึงเข่า", "งอศอกลดอกลงใกล้พื้น แล้วดันตัวขึ้นกลับตำแหน่งเริ่มต้น", "หายใจเข้าขณะลด หายใจออกขณะดันขึ้น"],
+    caution: "อย่าให้สะโพกยุบหรือยกสูงเกินไป รักษาลำตัวเป็นเส้นตรงตลอดการเคลื่อนไหว",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/13/bent-knee-push-up/" },
+  { id: "ch02", name: "วิดพื้นยกสูง (Incline Push-up)", part: "chest", difficulty: "beginner", pattern: "push", equipmentTags: ["bench"], equipment: "ม้านั่ง/ขั้นบันได", primary: "หน้าอกส่วนล่าง, ไหล่",
+    how: ["วางมือบนม้านั่งหรือขอบที่มั่นคง เท้าอยู่บนพื้น", "ลำตัวเป็นเส้นตรง งอศอกลดอกลงหาขอบม้านั่ง", "ดันตัวขึ้นกลับตำแหน่งเริ่มต้นอย่างควบคุม", "ยิ่งมุมชันมาก ยิ่งฝึกง่ายขึ้น เหมาะเป็นท่าเริ่มต้น"],
+    caution: "เลือกพื้นผิวที่มั่นคงไม่ลื่นไถล ระวังข้อมือหากมีอาการปวดข้อมือ",
+    safeForLimitation: true, sourceId: "nasm", sourceUrl: "https://www.nasm.org/resource-center/exercise-library/incline-push-up" },
+  { id: "ch02b", name: "วิดพื้นมาตรฐาน (Standard Push-up)", part: "chest", difficulty: "intermediate", pattern: "push", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "หน้าอก, ไหล่ด้านหน้า, ต้นแขนหลัง, แกนกลางลำตัว",
+    how: ["วางมือกว้างกว่าหัวไหล่เล็กน้อย ปลายเท้ายันพื้น ลำตัวเป็นเส้นตรง", "เกร็งหน้าท้องและสะโพกไม่ให้ยุบหรือยกสูง", "งอศอกลดอกลงใกล้พื้น แล้วดันตัวขึ้นกลับตำแหน่งเริ่มต้น", "หากยังทำไม่ไหวครบเซต ให้สลับกับท่าคุกเข่าได้"],
+    caution: "อย่าให้สะโพกยุบหรือยกสูงเกินไป รักษาลำตัวเป็นเส้นตรงตลอดการเคลื่อนไหว",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/41/push-up/" },
+  { id: "ch03", name: "ดัมเบลกดอกท่านอนราบ (Flat Dumbbell Chest Press)", part: "chest", difficulty: "intermediate", pattern: "push", equipmentTags: ["dumbbell", "bench"], equipment: "ดัมเบล, ม้านั่ง", primary: "หน้าอก, ไหล่ด้านหน้า, ต้นแขนหลัง",
+    how: ["นอนหงายบนม้านั่ง เท้าวางมั่นคงบนพื้น", "ถือดัมเบลสองข้างระดับหน้าอก ฝ่ามือหันไปทางปลายเท้า", "ดันดัมเบลขึ้นจนแขนเกือบเหยียดตรง แล้วลดลงอย่างควบคุม", "รักษาสะบักแนบม้านั่งตลอดการเคลื่อนไหว"],
+    caution: "เริ่มด้วยน้ำหนักเบาเพื่อฝึกฟอร์มก่อนเพิ่มน้ำหนัก ควรมีผู้ช่วยดูแลหากใช้น้ำหนักมาก",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/19/chest-press/" },
+  { id: "ch04", name: "ดัมเบลกดอกท่าเอียง (Incline Dumbbell Press)", part: "chest", difficulty: "intermediate", pattern: "push", equipmentTags: ["dumbbell", "bench"], equipment: "ดัมเบล, ม้านั่งปรับเอียง", primary: "หน้าอกส่วนบน, ไหล่",
+    how: ["ปรับม้านั่งเอียง 45-60 องศา นอนพิงหลังให้แนบเบาะ", "ถือดัมเบลสองข้างระดับไหล่", "ดันขึ้นเหนือระดับสายตาเล็กน้อยแล้วลดลงอย่างควบคุม", "หลีกเลี่ยงการโก่งหลังส่วนล่าง"],
+    caution: "หากรู้สึกเมื่อยล้าที่ไหล่มากผิดปกติให้ลดน้ำหนักหรือมุมเอียงลง",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/25/incline-chest-press/" },
+  { id: "ch05", name: "เคเบิลกางแขนยืน (Standing Chest Fly)", part: "chest", difficulty: "intermediate", pattern: "push", equipmentTags: ["cable"], equipment: "สายเคเบิล/ยางยืด", primary: "หน้าอก",
+    how: ["ยืนกึ่งกลางระหว่างจุดยึดสองข้าง แขนกางออกด้านข้างระดับไหล่", "งอศอกเล็กน้อย ค่อยๆดึงมือทั้งสองมาบรรจบกันด้านหน้าลำตัว", "ค้างไว้ 1 วินาทีแล้วคลายกลับช้าๆ", "รักษาแกนกลางลำตัวให้มั่นคงตลอดการเคลื่อนไหว"],
+    caution: "อย่าใช้แรงเหวี่ยง เคลื่อนไหวช้าและควบคุมได้ตลอดช่วง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/160/standing-chest-fly/" },
+  { id: "ch06", name: "บาร์เบลเบนช์เพรส (Barbell Bench Press)", part: "chest", difficulty: "advanced", pattern: "push", equipmentTags: ["barbell", "bench"], equipment: "บาร์เบล, ม้านั่ง, ราวยึด", primary: "หน้าอก, ไหล่, ต้นแขนหลัง",
+    how: ["นอนบนม้านั่ง จับบาร์กว้างกว่าหัวไหล่เล็กน้อย", "ยกบาร์ออกจากราง ลดลงแตะหน้าอกอย่างควบคุม", "ดันบาร์ขึ้นจนแขนเหยียดตรง", "ควรมีผู้ช่วยคอยดูแล (spotter) เสมอเมื่อใช้น้ำหนักมาก"],
+    caution: "ท่านี้มีความเสี่ยงสูงหากฟอร์มไม่ถูกต้อง แนะนำให้ฝึกกับผู้ฝึกสอนก่อนเพิ่มน้ำหนัก",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/5/chest-press/" },
+
+  // ---------- BACK ----------
+  { id: "bk01", name: "ซูเปอร์แมน (Superman Raise)", part: "back", difficulty: "beginner", pattern: "hinge", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "หลังส่วนล่าง, สะโพก",
+    how: ["นอนคว่ำ เหยียดแขนไปข้างหน้า ขาเหยียดตรง", "ยกแขนและขาขึ้นพร้อมกันเล็กน้อยโดยไม่เกร็งคอ", "ค้างไว้ 2-3 วินาทีแล้วลดลงอย่างควบคุม", "หายใจสม่ำเสมอตลอดการเคลื่อนไหว"],
+    caution: "ยกในระดับที่รู้สึกสบาย ไม่ต้องยกสูงมาก เพื่อลดแรงกดที่หลังส่วนล่าง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/9/supermans/" },
+  { id: "bk02", name: "ดัมเบลโรว์ก้มตัว (Bent-over Dumbbell Row)", part: "back", difficulty: "beginner", pattern: "pull", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "หลังกลาง, ไหล่หลัง, ต้นแขนหน้า",
+    how: ["ก้มตัวไปข้างหน้าประมาณ 45 องศา หลังตรง เข่างอเล็กน้อย", "ถือดัมเบลสองข้างปล่อยแขนตรง", "ดึงดัมเบลขึ้นข้างลำตัวจนศอกเลยแนวหลัง บีบสะบัก", "ลดลงอย่างควบคุมกลับตำแหน่งเริ่มต้น"],
+    caution: "รักษาหลังตรงตลอดเวลา ห้ามโก่งหรือแอ่นหลังขณะดึงน้ำหนัก",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/12/bent-over-row/" },
+  { id: "bk03", name: "เคเบิลโรว์นั่ง (Seated Cable Row)", part: "back", difficulty: "intermediate", pattern: "pull", equipmentTags: ["machine"], equipment: "เครื่องเคเบิล", primary: "หลังกลาง, ไหล่หลัง",
+    how: ["นั่งจับด้ามจับ เท้าวางบนแท่นรอง เข่างอเล็กน้อย", "หลังตรง ดึงด้ามจับเข้าหาลำตัวช่วงท้อง บีบสะบักเข้าหากัน", "ค้างไว้สั้นๆแล้วคลายกลับอย่างควบคุม", "อย่าใช้แรงเหวี่ยงจากลำตัว"],
+    caution: "หลีกเลี่ยงการโน้มตัวไปมามากเกินไป เน้นการเคลื่อนไหวที่แขนและสะบัก",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/48/seated-row/" },
+  { id: "bk04", name: "ดึงบาร์เหนือศีรษะ (Lat Pulldown)", part: "back", difficulty: "intermediate", pattern: "pull", equipmentTags: ["machine"], equipment: "เครื่องเคเบิล", primary: "ปีกหลัง (Lats), ต้นแขนหน้า",
+    how: ["นั่งจับบาร์กว้างกว่าหัวไหล่ ล็อกเข่าใต้แท่นรอง", "ดึงบาร์ลงมาระดับหน้าอกบน บีบสะบักลงและเข้าหากัน", "ค้างสั้นๆแล้วปล่อยขึ้นอย่างควบคุม", "หลีกเลี่ยงการโน้มตัวไปด้านหลังมากเกินไป"],
+    caution: "อย่าดึงบาร์ไปด้านหลังคอ เสี่ยงต่อการบาดเจ็บที่ไหล่",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/158/seated-lat-pulldown/" },
+  { id: "bk05", name: "ดึงข้อ/ดึงข้อแบบมีตัวช่วย (Pull-up / Assisted Pull-up)", part: "back", difficulty: "advanced", pattern: "pull", equipmentTags: ["pullup_bar"], equipment: "บาร์ดึงข้อ", primary: "ปีกหลัง, ต้นแขนหน้า",
+    how: ["จับบาร์มือกว้างกว่าหัวไหล่เล็กน้อย ห้อยตัวแขนเหยียดตรง", "ดึงตัวขึ้นจนคางเลยระดับบาร์", "ลดตัวลงอย่างควบคุมจนแขนเหยียดตรงอีกครั้ง", "ใช้แถบยางช่วยพยุงหากยังดึงข้อเต็มตัวไม่ได้"],
+    caution: "หากมีอาการปวดไหล่หรือข้อศอก ควรหลีกเลี่ยงหรือปรึกษาผู้เชี่ยวชาญก่อน",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/191/pull-ups/" },
+  { id: "bk06", name: "บาร์เบลเดดลิฟต์ (Barbell Deadlift)", part: "back", difficulty: "advanced", pattern: "hinge", equipmentTags: ["barbell"], equipment: "บาร์เบล", primary: "หลังล่าง, สะโพก, ต้นขาหลัง",
+    how: ["ยืนเท้าห่างเท่าสะโพก บาร์อยู่เหนือกลางเท้า", "ก้มตัวจับบาร์ หลังตรง อกเปิด สะโพกดันไปด้านหลัง", "ยกบาร์ขึ้นโดยดันสะโพกไปข้างหน้า รักษาหลังตรงตลอด", "ลดบาร์ลงอย่างควบคุมด้วยการดันสะโพกกลับ"],
+    caution: "ท่านี้มีความเสี่ยงต่อหลังส่วนล่างสูงหากฟอร์มผิด แนะนำให้เรียนรู้จากผู้ฝึกสอนก่อนใช้น้ำหนักจริง",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/6/deadlift/" },
+
+  // ---------- SHOULDERS ----------
+  { id: "sh01", name: "ดัมเบลยกข้าง (Lateral Raise)", part: "shoulders", difficulty: "beginner", pattern: "raise", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ไหล่ด้านข้าง",
+    how: ["ยืนถือดัมเบลข้างลำตัว ศอกงอเล็กน้อย", "ยกแขนออกด้านข้างจนระดับไหล่", "ค้างสั้นๆแล้วลดลงอย่างควบคุม", "ใช้น้ำหนักเบาเพื่อรักษาฟอร์มที่ถูกต้อง"],
+    caution: "อย่ายกสูงเกินระดับไหล่และอย่าใช้แรงเหวี่ยงจากลำตัว",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/26/lateral-raise/" },
+  { id: "sh02", name: "ดัมเบลยกหน้า (Front Raise)", part: "shoulders", difficulty: "beginner", pattern: "raise", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ไหล่ด้านหน้า",
+    how: ["ยืนถือดัมเบลด้านหน้าต้นขา", "ยกแขนขึ้นตรงไปด้านหน้าจนระดับไหล่", "ลดลงอย่างควบคุมกลับตำแหน่งเริ่มต้น", "สลับข้างหรือยกพร้อมกันตามความถนัด"],
+    caution: "หลีกเลี่ยงการแอ่นหลังขณะยกน้ำหนัก",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/54/front-raise/" },
+  { id: "sh03", name: "ดัมเบลกดไหล่นั่ง (Seated Dumbbell Shoulder Press)", part: "shoulders", difficulty: "intermediate", pattern: "push", equipmentTags: ["dumbbell", "bench"], equipment: "ดัมเบล, ม้านั่งมีพนัก", primary: "ไหล่, ต้นแขนหลัง",
+    how: ["นั่งพิงพนัก ถือดัมเบลระดับไหล่ ฝ่ามือหันไปข้างหน้า", "ดันดัมเบลขึ้นเหนือศีรษะจนแขนเกือบเหยียดตรง", "ลดลงอย่างควบคุมกลับระดับไหล่", "รักษาแกนกลางลำตัวมั่นคงตลอดการเคลื่อนไหว"],
+    caution: "หลีกเลี่ยงการแอ่นหลังส่วนล่างขณะดันน้ำหนักขึ้น",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/43/seated-shoulder-press/" },
+  { id: "sh04", name: "รีเวิร์สเฟลย์ (Rear Delt Fly)", part: "shoulders", difficulty: "intermediate", pattern: "raise", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ไหล่ด้านหลัง, หลังบน",
+    how: ["ก้มตัวไปข้างหน้า หลังตรง ถือดัมเบลห้อยลง", "กางแขนออกด้านข้างโดยบีบสะบักเข้าหากัน", "ค้างสั้นๆแล้วลดลงอย่างควบคุม", "ใช้น้ำหนักเบาเพราะกล้ามเนื้อมัดเล็ก"],
+    caution: "หลีกเลี่ยงการเหวี่ยงตัวขึ้นลงเพื่อช่วยยกน้ำหนัก",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/34/incline-reverse-fly/" },
+  { id: "sh05", name: "ไพค์ พุชอัพ (Pike Push-up)", part: "shoulders", difficulty: "intermediate", pattern: "push", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ไหล่, ต้นแขนหลัง",
+    how: ["อยู่ในท่าวิดพื้น ยกสะโพกขึ้นสูงให้ลำตัวเป็นรูปตัว V คว่ำ", "งอศอกลดศีรษะลงใกล้พื้นระหว่างมือ", "ดันตัวขึ้นกลับตำแหน่งเริ่มต้น", "ปรับความชันของสะโพกตามระดับความยาก"],
+    caution: "ระวังแรงกดที่ข้อมือ หากปวดข้อมือให้ลดระดับความชันลง",
+    safeForLimitation: false, sourceId: "nasm", sourceUrl: "https://www.nasm.org/resource-center/exercise-library/pike-push-up" },
+  { id: "sh06", name: "บาร์เบลดันไหล่ยืน (Standing Barbell Overhead Press)", part: "shoulders", difficulty: "advanced", pattern: "push", equipmentTags: ["barbell"], equipment: "บาร์เบล", primary: "ไหล่, ต้นแขนหลัง, แกนกลางลำตัว",
+    how: ["ยืนเท้าห่างเท่าสะโพก ถือบาร์ระดับไหล่", "เกร็งแกนกลางลำตัว ดันบาร์ขึ้นเหนือศีรษะจนแขนเหยียดตรง", "ลดลงอย่างควบคุมกลับระดับไหล่", "หลีกเลี่ยงการแอ่นหลังส่วนล่างขณะดันขึ้น"],
+    caution: "ท่านี้ต้องการความมั่นคงของแกนกลางลำตัวสูง ควรฝึกฟอร์มด้วยน้ำหนักเบาก่อน",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/71/standing-shoulder-press/" },
+
+  // ---------- ARMS ----------
+  { id: "ar01", name: "ดัมเบลเคิร์ล (Dumbbell Bicep Curl)", part: "arms", difficulty: "beginner", pattern: "pull", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นแขนหน้า (Biceps)",
+    how: ["ยืนถือดัมเบลข้างลำตัว ฝ่ามือหันไปข้างหน้า", "งอศอกยกดัมเบลขึ้นโดยไม่ขยับต้นแขน", "บีบกล้ามเนื้อค้างสั้นๆแล้วลดลงอย่างควบคุม", "หลีกเลี่ยงการแกว่งลำตัวช่วยยก"],
+    caution: "รักษาศอกให้แนบข้างลำตัวตลอดการเคลื่อนไหว",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/70/bicep-curl/" },
+  { id: "ar02", name: "แฮมเมอร์เคิร์ล (Hammer Curl)", part: "arms", difficulty: "beginner", pattern: "pull", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นแขนหน้า, ปลายแขน",
+    how: ["ยืนถือดัมเบลข้างลำตัว ฝ่ามือหันเข้าหาลำตัว", "งอศอกยกดัมเบลขึ้นโดยรักษาฝ่ามือหันเข้าตลอด", "ค้างสั้นๆแล้วลดลงอย่างควบคุม", "ทำสลับข้างหรือพร้อมกันตามความถนัด"],
+    caution: "อย่าใช้แรงเหวี่ยงจากไหล่หรือลำตัวช่วยยก",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/10/hammer-curl/" },
+  { id: "ar03", name: "ดิปกับม้านั่ง (Bench Triceps Dip)", part: "arms", difficulty: "beginner", pattern: "push", equipmentTags: ["bench"], equipment: "ม้านั่ง", primary: "ต้นแขนหลัง (Triceps)",
+    how: ["นั่งบนขอบม้านั่ง มือวางข้างสะโพกจับขอบม้านั่ง", "เลื่อนสะโพกออกจากม้านั่ง งอศอกลดตัวลง", "ดันตัวขึ้นกลับตำแหน่งเริ่มต้นโดยใช้แขน", "งอเข่าเพื่อลดความหนักหากยังไม่แข็งแรงพอ"],
+    caution: "อย่าลดตัวลงลึกเกินไปจนไหล่รู้สึกอึดอัดหรือเจ็บ",
+    safeForLimitation: true, sourceId: "nasm", sourceUrl: "https://www.nasm.org/resource-center/exercise-library/bench-dips" },
+  { id: "ar04", name: "ทริเซปคิกแบ็ก (Triceps Kickback)", part: "arms", difficulty: "intermediate", pattern: "push", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นแขนหลัง",
+    how: ["ก้มตัวไปข้างหน้า หลังตรง ต้นแขนแนบข้างลำตัวขนานพื้น", "เหยียดศอกดันดัมเบลไปด้านหลังจนแขนตรง", "ค้างสั้นๆแล้วงอศอกกลับตำแหน่งเริ่มต้น", "รักษาต้นแขนนิ่งตลอดการเคลื่อนไหว"],
+    caution: "ใช้น้ำหนักเบาเพื่อรักษาฟอร์มและหลีกเลี่ยงการแกว่งตัว",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/55/triceps-kickback/" },
+  { id: "ar05", name: "ทริเซปเอ็กซ์เทนชันเหนือศีรษะ (Overhead Triceps Extension)", part: "arms", difficulty: "intermediate", pattern: "push", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นแขนหลัง",
+    how: ["ยืนหรือนั่ง ถือดัมเบลสองมือเหนือศีรษะ แขนเหยียดตรง", "งอศอกลดดัมเบลลงด้านหลังศีรษะ", "เหยียดศอกดันกลับขึ้นตำแหน่งเริ่มต้น", "รักษาต้นแขนนิ่งชิดใบหูตลอดการเคลื่อนไหว"],
+    caution: "ระวังไม่ให้ศอกกางออกด้านข้างมากเกินไป",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/74/triceps-extension/" },
+  { id: "ar06", name: "บาร์เบลเคิร์ล (Barbell Curl)", part: "arms", difficulty: "advanced", pattern: "pull", equipmentTags: ["barbell"], equipment: "บาร์เบล", primary: "ต้นแขนหน้า",
+    how: ["ยืนถือบาร์กว้างเท่าหัวไหล่ ฝ่ามือหันออก", "งอศอกยกบาร์ขึ้นโดยไม่ขยับต้นแขนหรือลำตัว", "บีบกล้ามเนื้อค้างสั้นๆแล้วลดลงอย่างควบคุม", "หลีกเลี่ยงการแอ่นหลังหรือแกว่งตัวช่วยยก"],
+    caution: "หากรู้สึกปวดหลังส่วนล่างขณะทำท่านี้ ให้ลดน้ำหนักลงทันที",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/70/bicep-curl/" },
+  { id: "ar07", name: "วิดพื้นแคบ (Close-grip Push-up)", part: "arms", difficulty: "beginner", pattern: "push", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ต้นแขนหลัง, หน้าอก",
+    how: ["อยู่ในท่าวิดพื้น มือวางชิดกันใต้กึ่งกลางหน้าอก", "ลดตัวลงโดยศอกแนบชิดลำตัว", "ดันตัวขึ้นกลับตำแหน่งเริ่มต้น", "คุกเข่าลงหากยังไม่แข็งแรงพอสำหรับท่ามาตรฐาน"],
+    caution: "ระวังแรงกดที่ข้อมือ หยุดหากรู้สึกปวด",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/41/push-up/" },
+
+  // ---------- ABS / CORE ----------
+  { id: "ab01", name: "แพลงก์ (Plank)", part: "abs", difficulty: "beginner", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "แกนกลางลำตัว",
+    how: ["วางศอกและปลายเท้าลงพื้น ลำตัวเป็นเส้นตรง", "เกร็งหน้าท้องและสะโพกไม่ให้ยุบหรือยกสูง", "ค้างท่าตามเวลาที่กำหนดโดยหายใจสม่ำเสมอ", "หยุดพักหากฟอร์มเริ่มเสีย"],
+    caution: "อย่ากลั้นหายใจ และหยุดหากปวดหลังส่วนล่าง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/32/front-plank/" },
+  { id: "ab02", name: "ครันช์ (Crunch)", part: "abs", difficulty: "beginner", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "หน้าท้องส่วนบน",
+    how: ["นอนหงาย ชันเข่า เท้าวางราบกับพื้น", "ประสานมือหลังศีรษะเบาๆ ไม่ดึงคอ", "ยกไหล่ขึ้นจากพื้นเล็กน้อยโดยใช้หน้าท้อง", "ลดลงอย่างควบคุมกลับตำแหน่งเริ่มต้น"],
+    caution: "อย่าดึงคอหรือศีรษะขึ้นด้วยมือ ให้ใช้แรงจากหน้าท้อง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/52/crunch/" },
+  { id: "ab03", name: "เดดบัค (Dead Bug)", part: "abs", difficulty: "beginner", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "แกนกลางลำตัว, หลังส่วนล่าง",
+    how: ["นอนหงาย ยกแขนตรงขึ้นเหนือไหล่ ยกขาตั้งฉาก 90 องศา", "เหยียดแขนขวาและขาซ้ายลงพร้อมกันโดยไม่ให้หลังแอ่น", "กลับตำแหน่งเริ่มต้นแล้วสลับข้าง", "เคลื่อนไหวช้าและควบคุมได้ตลอด"],
+    caution: "รักษาหลังส่วนล่างแนบพื้นตลอดการเคลื่อนไหว เหมาะสำหรับผู้ที่มีข้อจำกัดด้านหลัง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/147/supine-dead-bug/" },
+  { id: "ab04", name: "รัสเซียนทวิสต์ (Russian Twist)", part: "abs", difficulty: "intermediate", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์/ดัมเบลเบา", primary: "หน้าท้องด้านข้าง (Obliques)",
+    how: ["นั่งเอนตัวไปด้านหลังเล็กน้อย เข่างอ ยกเท้าลอยพื้นเล็กน้อย", "บิดลำตัวไปด้านข้างสลับซ้ายขวา", "รักษาหลังตรงไม่โก่งงอ", "ลดระดับความยากโดยวางเท้าติดพื้น"],
+    caution: "หากปวดหลังส่วนล่าง ให้วางเท้าติดพื้นเพื่อลดแรงกด",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/65/russian-twist/" },
+  { id: "ab05", name: "ยกขาท่านอน (Leg Raise)", part: "abs", difficulty: "intermediate", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "หน้าท้องส่วนล่าง",
+    how: ["นอนหงาย ขาเหยียดตรง มือวางข้างลำตัวหรือใต้สะโพก", "ยกขาขึ้นตั้งฉากกับพื้นโดยไม่งอเข่า", "ลดลงอย่างควบคุมโดยไม่ให้หลังแอ่นหรือกระแทกพื้น", "หยุดก่อนขาแตะพื้นเพื่อคงความตึงของกล้ามเนื้อ"],
+    caution: "หากหลังส่วนล่างแอ่นขณะทำท่านี้ ให้งอเข่าเล็กน้อยเพื่อลดแรงกด",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/body-part/abs/" },
+  { id: "ab06", name: "เมาน์เทนไคลม์เบอร์ (Mountain Climber)", part: "abs", difficulty: "intermediate", pattern: "core", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "แกนกลางลำตัว, หัวใจและปอด",
+    how: ["อยู่ในท่าแพลงก์มือตรง", "ดึงเข่าข้างหนึ่งเข้าหาอกสลับกับอีกข้างอย่างรวดเร็ว", "รักษาสะโพกให้นิ่งไม่ยกสูงขึ้น", "ปรับจังหวะให้ช้าลงได้หากยังไม่คุ้นเคย"],
+    caution: "รักษาลำตัวให้มั่นคง อย่าให้หลังแอ่นขณะเคลื่อนขา",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/258/mountain-climbers/" },
+  { id: "ab07", name: "ยกขาห้อยตัว (Hanging Leg Raise)", part: "abs", difficulty: "advanced", pattern: "core", equipmentTags: ["pullup_bar"], equipment: "บาร์ดึงข้อ", primary: "หน้าท้องส่วนล่าง, ท่อนแขน",
+    how: ["ห้อยตัวจับบาร์ แขนเหยียดตรง", "ยกขาขึ้นจนตั้งฉากกับลำตัวโดยไม่แกว่งตัว", "ลดลงอย่างควบคุมกลับตำแหน่งเริ่มต้น", "งอเข่าเพื่อลดความยากหากยังไม่แข็งแรงพอ"],
+    caution: "ต้องการความแข็งแรงของท่อนแขนและแกนกลางลำตัวสูง ไม่เหมาะสำหรับผู้เริ่มต้น",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/body-part/abs/" },
+
+  // ---------- LEGS ----------
+  { id: "lg01", name: "สควอทน้ำหนักตัว (Bodyweight Squat)", part: "legs", difficulty: "beginner", pattern: "squat", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ต้นขาหน้า, สะโพก, ต้นขาหลัง",
+    how: ["ยืนเท้าห่างเท่าไหล่ ปลายเท้าชี้ออกเล็กน้อย", "ย่อตัวลงเหมือนนั่งเก้าอี้ หลังตรง เข่าไม่เลยปลายเท้ามากเกินไป", "ลงจนต้นขาขนานพื้นหรือเท่าที่ทำได้อย่างมั่นคง", "ดันส้นเท้ายืนขึ้นกลับตำแหน่งเริ่มต้น"],
+    caution: "รักษาน้ำหนักที่ส้นเท้า และหลังตรงตลอดการเคลื่อนไหว",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/135/bodyweight-squat/" },
+  { id: "lg02", name: "ก้าวขึ้นแท่น (Step-Up)", part: "legs", difficulty: "beginner", pattern: "squat", equipmentTags: ["step"], equipment: "แท่นยกหรือขั้นบันได", primary: "ต้นขาหน้า, สะโพก",
+    how: ["ยืนหน้าแท่นที่มั่นคง ก้าวเท้าหนึ่งขึ้นบนแท่น", "ดันตัวขึ้นด้วยขาที่อยู่บนแท่นจนยืนตรง", "ลดตัวลงอย่างควบคุมกลับตำแหน่งเริ่มต้น", "สลับข้างให้เท่ากันทั้งสองข้าง"],
+    caution: "เลือกความสูงของแท่นที่เหมาะสมกับระดับความแข็งแรง และดูแลการทรงตัวข้อเท้า",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/28/step-up/" },
+  { id: "lg03", name: "ลันจ์ (Forward Lunge)", part: "legs", difficulty: "beginner", pattern: "squat", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ต้นขาหน้า, สะโพก, ต้นขาหลัง",
+    how: ["ยืนตรง ก้าวเท้าหนึ่งไปข้างหน้ายาวพอสมควร", "ลดตัวลงจนเข่าหลังเกือบแตะพื้น เข่าหน้าไม่เลยปลายเท้า", "ดันตัวกลับตำแหน่งยืนตรง", "สลับข้างให้เท่ากันทั้งสองข้าง"],
+    caution: "รักษาการทรงตัว และหลีกเลี่ยงเข่าหน้าที่บิดเข้าด้านใน",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/94/forward-lunge/" },
+  { id: "lg04", name: "ยกส้นเท้า (Calf Raise)", part: "legs", difficulty: "beginner", pattern: "raise", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "น่อง",
+    how: ["ยืนตรง เท้าห่างเท่าสะโพก", "ยกส้นเท้าขึ้นให้สูงที่สุดโดยใช้ปลายเท้ารับน้ำหนัก", "ค้างสั้นๆแล้วลดลงอย่างควบคุม", "จับพนักพิงหรือกำแพงเพื่อช่วยทรงตัวได้"],
+    caution: "เคลื่อนไหวช้าเพื่อป้องกันตะคริวที่น่อง",
+    safeForLimitation: true, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/73/standing-calf-raises-wall/" },
+  { id: "lg05", name: "ดัมเบลโรมาเนียนเดดลิฟต์ (Dumbbell Romanian Deadlift)", part: "legs", difficulty: "intermediate", pattern: "hinge", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นขาหลัง, สะโพก, หลังล่าง",
+    how: ["ยืนถือดัมเบลด้านหน้าต้นขา เข่างอเล็กน้อย", "ดันสะโพกไปด้านหลัง ก้มตัวลงโดยหลังตรง ดัมเบลแนบขา", "ลดลงจนรู้สึกตึงที่ต้นขาหลัง แล้วดันสะโพกกลับขึ้นยืนตรง", "รักษาหลังตรงตลอดการเคลื่อนไหว"],
+    caution: "หากรู้สึกปวดหลังส่วนล่างขณะก้มตัว ให้ลดระยะการก้มลง",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/317/romanian-deadlift/" },
+  { id: "lg06", name: "เลกเพรส (Leg Press)", part: "legs", difficulty: "intermediate", pattern: "squat", equipmentTags: ["machine"], equipment: "เครื่องเลกเพรส", primary: "ต้นขาหน้า, สะโพก",
+    how: ["นั่งบนเครื่อง วางเท้าบนแท่นกว้างเท่าไหล่", "ปลดล็อกแล้วงอเข่าลดแท่นลงจนเข่าทำมุมประมาณ 90 องศา", "ดันแท่นกลับขึ้นโดยไม่ล็อกเข่าสุด", "รักษาหลังส่วนล่างแนบเบาะตลอดการเคลื่อนไหว"],
+    caution: "อย่าล็อกเข่าจนสุดในจังหวะดันขึ้น เพื่อลดแรงกดที่ข้อเข่า",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/154/seated-leg-press/" },
+  { id: "lg07", name: "บัลแกเรียนสปลิทสควอท (Bulgarian Split Squat)", part: "legs", difficulty: "advanced", pattern: "squat", equipmentTags: ["bench"], equipment: "ม้านั่ง, ดัมเบล(ถ้ามี)", primary: "ต้นขาหน้า, สะโพก",
+    how: ["ยืนหันหลังให้ม้านั่ง วางหลังเท้าข้างหนึ่งบนม้านั่ง", "ย่อเข่าหน้าลงจนต้นขาขนานพื้น หลังตรง", "ดันตัวขึ้นกลับตำแหน่งเริ่มต้นด้วยขาหน้า", "สลับข้างให้เท่ากันทั้งสองข้าง"],
+    caution: "ต้องการการทรงตัวที่ดี ควรฝึกโดยไม่มีน้ำหนักก่อนจนมั่นใจ",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/366/bulgarian-split-squat/" },
+  { id: "lg08", name: "บาร์เบลแบ็คสควอท (Barbell Back Squat)", part: "legs", difficulty: "advanced", pattern: "squat", equipmentTags: ["barbell"], equipment: "บาร์เบล, แร็ค", primary: "ต้นขาหน้า, สะโพก, แกนกลางลำตัว",
+    how: ["วางบาร์บนบ่าส่วนบน (ไม่ใช่คอ) จับบาร์กว้างกว่าไหล่", "ยกบาร์ออกจากแร็ค เท้าห่างเท่าไหล่", "ย่อตัวลงเหมือนสควอทน้ำหนักตัว หลังตรงตลอด", "ดันส้นเท้ายืนขึ้นกลับตำแหน่งเริ่มต้น"],
+    caution: "ท่านี้มีความเสี่ยงสูงหากฟอร์มไม่ถูกต้อง ควรฝึกกับผู้ฝึกสอนและมีแร็คนิรภัยเสมอ",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/11/back-squat/" },
+
+  // ---------- FULL BODY ----------
+  { id: "fb01", name: "แจ็คกระโดด (Jumping Jack)", part: "fullbody", difficulty: "beginner", pattern: "dynamic", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ทั่วร่างกาย, หัวใจและปอด",
+    how: ["ยืนตรง แขนแนบลำตัว", "กระโดดกางขาพร้อมยกแขนขึ้นเหนือศีรษะ", "กระโดดกลับตำแหน่งเริ่มต้น", "ทำต่อเนื่องตามจังหวะที่กำหนด"],
+    caution: "เลือกพื้นผิวที่มีแรงกระแทกต่ำหากมีปัญหาข้อเข่าหรือข้อเท้า",
+    safeForLimitation: true, sourceId: "nasm", sourceUrl: "https://www.nasm.org/resource-center/exercise-library/jumping-jacks" },
+  { id: "fb02", name: "แบร์ครอว์ (Bear Crawl)", part: "fullbody", difficulty: "intermediate", pattern: "dynamic", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ทั่วร่างกาย, แกนกลางลำตัว",
+    how: ["อยู่ในท่าคลานโดยยกเข่าลอยจากพื้นเล็กน้อย", "คลานไปข้างหน้าโดยขยับมือและเท้าสลับข้าง", "รักษาหลังตรงและสะโพกไม่ยกสูงเกินไป", "เคลื่อนที่ช้าและควบคุมได้ตลอด"],
+    caution: "ระวังข้อมือ หากปวดข้อมือให้ลดระยะเวลาหรือหยุดพัก",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/150/bear-crawl/" },
+  { id: "fb03", name: "เคทเทิลเบลสวิง (Kettlebell Swing)", part: "fullbody", difficulty: "intermediate", pattern: "dynamic", equipmentTags: ["kettlebell"], equipment: "เคทเทิลเบล", primary: "สะโพก, ต้นขาหลัง, แกนกลางลำตัว",
+    how: ["ยืนเท้าห่างเท่าไหล่ ถือเคทเทิลเบลสองมือด้านหน้า", "ดันสะโพกไปด้านหลังแกว่งเคทเทิลเบลระหว่างขา", "ดันสะโพกไปข้างหน้าอย่างรวดเร็วให้แกว่งขึ้นระดับไหล่", "ควบคุมจังหวะแกว่งกลับลงอย่างต่อเนื่อง"],
+    caution: "ใช้แรงจากสะโพกไม่ใช่แขนหรือหลัง เริ่มด้วยน้ำหนักเบาเพื่อฝึกฟอร์ม",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/391/swing/" },
+  { id: "fb04", name: "เบอร์พี (Burpee)", part: "fullbody", difficulty: "advanced", pattern: "dynamic", equipmentTags: ["none"], equipment: "ไม่ใช้อุปกรณ์", primary: "ทั่วร่างกาย, หัวใจและปอด",
+    how: ["ยืนตรง ย่อตัวลงวางมือบนพื้น", "กระโดดเท้าถอยไปด้านหลังเป็นท่าแพลงก์ (หรือวิดพื้น 1 ครั้ง)", "กระโดดเท้ากลับมาใกล้มือ", "กระโดดขึ้นพร้อมยกแขนเหนือศีรษะ"],
+    caution: "ท่านี้มีแรงกระแทกสูง ไม่เหมาะสำหรับผู้มีปัญหาข้อเข่า ข้อเท้า หรือหลัง",
+    safeForLimitation: false, sourceId: "nasm", sourceUrl: "https://www.nasm.org/resource-center/exercise-library/squat-thrust-burpees" },
+  { id: "fb05", name: "ทรัสเตอร์ (Squat to Press Thruster)", part: "fullbody", difficulty: "advanced", pattern: "dynamic", equipmentTags: ["dumbbell"], equipment: "ดัมเบล", primary: "ต้นขา, สะโพก, ไหล่",
+    how: ["ยืนถือดัมเบลระดับไหล่ เท้าห่างเท่าไหล่", "ย่อตัวลงเป็นท่าสควอทเต็มช่วง", "ดันตัวยืนขึ้นพร้อมดันดัมเบลขึ้นเหนือศีรษะในจังหวะเดียว", "ลดดัมเบลกลับระดับไหล่ก่อนเริ่มรอบถัดไป"],
+    caution: "ต้องการฟอร์มสควอทและดันไหล่ที่ถูกต้องก่อนเพิ่มน้ำหนักหรือความเร็ว",
+    safeForLimitation: false, sourceId: "ace", sourceUrl: "https://www.acefitness.org/resources/everyone/exercise-library/body-part/full-body-integrated/" },
+];
+// ===================== LOOKUP TABLES =====================
+const GOALS = [
+  { id: "fatloss", label: "ลดน้ำหนัก", icon: "Flame" },
+  { id: "hypertrophy", label: "เพิ่มกล้ามเนื้อ", icon: "Dumbbell" },
+  { id: "strength", label: "เพิ่มความแข็งแรง", icon: "Zap" },
+  { id: "health", label: "ดูแลสุขภาพทั่วไป", icon: "HeartPulse" },
+];
+
+const LEVELS = [
+  { id: "beginner", label: "มือใหม่" },
+  { id: "intermediate", label: "ปานกลาง" },
+  { id: "advanced", label: "ระดับสูง" },
+];
+const DIFFICULTY_RANK = { beginner: 1, intermediate: 2, advanced: 3 };
+
+const BODY_PARTS = [
+  { id: "chest", label: "หน้าอก" },
+  { id: "back", label: "หลัง" },
+  { id: "shoulders", label: "ไหล่" },
+  { id: "arms", label: "แขน" },
+  { id: "abs", label: "หน้าท้อง" },
+  { id: "legs", label: "ขา" },
+  { id: "fullbody", label: "Full Body" },
+];
+
+const EQUIPMENT = [
+  { id: "none", label: "ไม่ใช้อุปกรณ์ (ตัวเปล่า)" },
+  { id: "dumbbell", label: "ดัมเบล" },
+  { id: "barbell", label: "บาร์เบล" },
+  { id: "bench", label: "ม้านั่ง" },
+  { id: "pullup_bar", label: "บาร์ดึงข้อ" },
+  { id: "cable", label: "สายเคเบิล/ยางยืด" },
+  { id: "kettlebell", label: "เคทเทิลเบล" },
+  { id: "step", label: "แท่น/ขั้นบันได" },
+  { id: "machine", label: "เครื่องออกกำลังกาย (ยิม)" },
+];
+
+// Sets / reps / rest guidance per goal x level.
+// Synthesized from NASM (blog.nasm.org), Mayo Clinic and ACSM/NHS general-population
+// guidance cited in SOURCES — beginners are kept conservative (lower load / more
+// technique focus) even for the "strength" goal, per Mayo Clinic & NHS safety guidance.
+const SET_REP_TABLE = {
+  strength: {
+    beginner:     { sets: 3, reps: "6-8",   restSec: 90,  note: "เน้นฝึกฟอร์มให้ถูกต้องก่อนเพิ่มน้ำหนัก (Mayo Clinic, NHS)" },
+    intermediate: { sets: 4, reps: "5-6",   restSec: 120, note: "เพิ่มน้ำหนักแบบค่อยเป็นค่อยไปเมื่อทำครบเซตได้สบาย (NASM)" },
+    advanced:     { sets: 5, reps: "3-5",   restSec: 150, note: "โหลดหนัก พักนานเพื่อฟื้นตัวเต็มที่ระหว่างเซต (NASM, ACSM)" },
+  },
+  hypertrophy: {
+    beginner:     { sets: 3, reps: "10-12", restSec: 60, note: "เน้นช่วงการเคลื่อนไหวเต็มและควบคุมจังหวะ (NASM)" },
+    intermediate: { sets: 4, reps: "8-12",  restSec: 75, note: "เพิ่มปริมาณงานทีละน้อยเมื่อร่างกายปรับตัวได้ (NASM)" },
+    advanced:     { sets: 5, reps: "6-12",  restSec: 90, note: "รวมปริมาณเซตต่อสัปดาห์ที่สูงขึ้นเพื่อกระตุ้นการเติบโต (NASM)" },
+  },
+  fatloss: {
+    beginner:     { sets: 2, reps: "12-15", restSec: 30, note: "พักสั้นเพื่อเพิ่มอัตราการเผาผลาญระหว่างออกกำลังกาย (Mayo Clinic)" },
+    intermediate: { sets: 3, reps: "12-15", restSec: 30, note: "ทำต่อเนื่องแบบเซอร์กิตเพื่อกระตุ้นระบบหัวใจและหลอดเลือด" },
+    advanced:     { sets: 4, reps: "15-20", restSec: 30, note: "ควรผสานการออกกำลังกายแบบคาร์ดิโอร่วมด้วยเพื่อผลลัพธ์ที่ดีขึ้น" },
+  },
+  health: {
+    beginner:     { sets: 2, reps: "10-15", restSec: 60, note: "แม้เพียง 1-2 เซตต่อท่าก็เห็นผลได้หากทำสม่ำเสมอ (Mayo Clinic)" },
+    intermediate: { sets: 2, reps: "10-15", restSec: 60, note: "รักษาความสม่ำเสมออย่างน้อย 2 วัน/สัปดาห์ต่อกลุ่มกล้ามเนื้อ (NHS)" },
+    advanced:     { sets: 3, reps: "10-15", restSec: 45, note: "เน้นความหลากหลายของท่าเพื่อสุขภาพองค์รวม" },
+  },
+};
+
+// ===================== BMI (Asia-Pacific / WHO WPRO classification) =====================
+function calcBMI(heightCm, weightKg) {
+  const h = Number(heightCm) / 100;
+  const w = Number(weightKg);
+  if (!h || !w) return null;
+  return w / (h * h);
+}
+function bmiCategory(bmi) {
+  if (bmi == null || isNaN(bmi)) return null;
+  if (bmi < 18.5) return { label: "น้ำหนักน้อยกว่าเกณฑ์", tone: "info" };
+  if (bmi < 23) return { label: "สมส่วน", tone: "success" };
+  if (bmi < 25) return { label: "ท้วม / เริ่มเกินเกณฑ์", tone: "warn" };
+  if (bmi < 30) return { label: "อ้วนระดับ 1", tone: "danger" };
+  return { label: "อ้วนระดับ 2", tone: "danger" };
+}
+
+// ===================== VALIDATION =====================
+function validateProfile(p) {
+  const missing = [];
+  if (!p.age || p.age < 13 || p.age > 100) missing.push("อายุ (13-100 ปี)");
+  if (!p.gender) missing.push("เพศ");
+  if (!p.height || p.height < 100 || p.height > 250) missing.push("ส่วนสูง (100-250 ซม.)");
+  if (!p.weight || p.weight < 30 || p.weight > 250) missing.push("น้ำหนัก (30-250 กก.)");
+  if (!p.level) missing.push("ระดับประสบการณ์");
+  if (!p.goal) missing.push("เป้าหมายการออกกำลังกาย");
+  if (!p.bodyParts || p.bodyParts.length === 0) missing.push("ส่วนของร่างกายที่ต้องการเน้น (เลือกอย่างน้อย 1 ส่วน)");
+  if (!p.equipment || p.equipment.length === 0) missing.push("อุปกรณ์ที่มี (เลือกอย่างน้อย \"ไม่ใช้อุปกรณ์\")");
+  if (!p.daysPerWeek) missing.push("จำนวนวันที่ต้องการออกกำลังกายต่อสัปดาห์");
+  if (!p.duration) missing.push("ระยะเวลาในการออกกำลังกายต่อครั้ง");
+  return missing;
+}
+
+// Expands the "fullbody" selection into every muscle group so both the eligible
+// pool and the weekly split draw from all body parts, not just the 5 exercises
+// explicitly tagged "fullbody".
+function expandBodyParts(bodyParts) {
+  const bp = bodyParts || [];
+  return bp.includes("fullbody")
+    ? ["chest", "back", "shoulders", "arms", "abs", "legs", "fullbody"]
+    : bp;
+}
+
+// ===================== ELIGIBLE EXERCISE POOL =====================
+function getEligibleExercises(bodyParts, level, hasLimitation, equipment, avoidList) {
+  const effectiveParts = expandBodyParts(bodyParts);
+  const haveEquip = equipment && equipment.length ? equipment : ["none"];
+  const avoid = avoidList || [];
+  return EXERCISES.filter((ex) => {
+    if (!effectiveParts.includes(ex.part)) return false;
+    if (DIFFICULTY_RANK[ex.difficulty] > DIFFICULTY_RANK[level]) return false;
+    if (hasLimitation && !ex.safeForLimitation) return false;
+    if (!ex.equipmentTags.every((tag) => haveEquip.includes(tag))) return false;
+    if (avoid.includes(ex.id)) return false;
+    return true;
+  });
+}
+
+// ===================== WEEKLY SPLIT BUILDER =====================
+// Distributes selected body parts across the chosen training days per week,
+// following the >=2 non-consecutive days/muscle-group guidance from NHS / ACSM.
+function buildSplit(daysPerWeek, bodyParts) {
+  const parts = bodyParts && bodyParts.length ? bodyParts : ["fullbody"];
+  const isFullBody = parts.includes("fullbody");
+  const useParts = isFullBody ? expandBodyParts(parts) : parts;
+
+  let template;
+  if (isFullBody || daysPerWeek <= 3 || useParts.length <= 2) {
+    // Full-body style: every day trains all selected (or expanded) parts
+    template = Array.from({ length: daysPerWeek }, () => useParts);
+  } else if (daysPerWeek === 4) {
+    const mid = Math.ceil(useParts.length / 2);
+    const a = useParts.slice(0, mid);
+    const b = useParts.slice(mid).length ? useParts.slice(mid) : useParts.slice(0, mid);
+    template = [a, b, a, b];
+  } else {
+    // 5-6 days: rotate through parts in chunks of ~2-3 (push/pull/legs style)
+    const chunkSize = Math.max(2, Math.ceil(useParts.length / 3));
+    const chunks = [];
+    for (let i = 0; i < useParts.length; i += chunkSize) chunks.push(useParts.slice(i, i + chunkSize));
+    template = Array.from({ length: daysPerWeek }, (_, i) => chunks[i % chunks.length]);
+  }
+
+  const partLabel = (id) => (BODY_PARTS.find((b) => b.id === id) || {}).label || id;
+  return template.map((dayParts, i) => ({
+    dayIndex: i,
+    dayLabel: `วันที่ ${i + 1}`,
+    parts: dayParts,
+    focus: isFullBody ? "Full Body" : dayParts.map(partLabel).join(" + "),
+  }));
+}
+
+function exercisesPerDay(durationMin) {
+  return Math.max(3, Math.min(8, Math.round(Number(durationMin) / 8)));
+}
+
+// Deterministic fallback selector — stable given the same inputs, cycles through the
+// eligible pool per day so consecutive days get some variety while staying evidence-based.
+function pickExercisesForDay(pool, dayParts, count, dayIndex) {
+  const parts = dayParts || [];
+  const dayPool = pool.filter((ex) => parts.includes(ex.part));
+  const sorted = [...dayPool].sort((a, b) => a.id.localeCompare(b.id));
+  if (sorted.length === 0) return [];
+  const out = [];
+  const offset = (dayIndex * 2) % sorted.length;
+  for (let i = 0; i < count && i < sorted.length; i++) {
+    out.push(sorted[(offset + i) % sorted.length]);
+  }
+  return out;
+}
+
+function buildDeterministicPlan(profile, split) {
+  const pool = getEligibleExercises(profile.bodyParts, profile.level, profile.hasLimitation, profile.equipment, profile.avoidList);
+  const perDay = exercisesPerDay(profile.duration);
+  return split.map((day) => ({
+    ...day,
+    exercises: pickExercisesForDay(pool, day.parts, perDay, day.dayIndex).map((ex) => ex.id),
+  }));
+}
+
+// ===================== WARM-UP / COOL-DOWN =====================
+// Short, low-risk, equipment-free movement prep and static stretches. Mayo Clinic
+// (SOURCES: mayo1) recommends 5-10 min of light warm-up before strength training;
+// NHS (SOURCES: nhs) recommends stretching as part of a well-rounded routine.
+const WARMUP_MOVES = [
+  { id: "wu1", name: "หมุนแขนเป็นวงกลม (Arm Circles)", seconds: 30,
+    how: "ยืนตรง กางแขนออกด้านข้างระดับไหล่ หมุนแขนเป็นวงกลมเล็กไปใหญ่ ทำสลับทิศทาง" },
+  { id: "wu2", name: "สวิงขาหน้า-หลัง (Leg Swings)", seconds: 30,
+    how: "ยืนทรงตัวข้างเดียว แกว่งขาอีกข้างไปด้านหน้า-หลังเบาๆ สลับข้างหลังทำครบเวลา" },
+  { id: "wu3", name: "สควอทตัวเปล่าช้าๆ (Slow Bodyweight Squat)", seconds: 30,
+    how: "ย่อ-ยืนช้าๆ ตามจังหวะหายใจ เพื่อกระตุ้นกล้ามเนื้อขาและสะโพกก่อนฝึกหนัก" },
+  { id: "wu4", name: "แจ็คกระโดดเบาๆ (Light Jumping Jacks)", seconds: 45,
+    how: "กระโดดจังหวะเบาๆ เพื่อเพิ่มอัตราการเต้นหัวใจและอุณหภูมิร่างกายก่อนเริ่มโปรแกรมหลัก" },
+];
+const COOLDOWN_MOVES = [
+  { id: "cd1", name: "ยืดต้นขาหลัง (Hamstring Stretch)", seconds: 30,
+    how: "นั่งเหยียดขาข้างหนึ่งตรง ก้มตัวไปข้างหน้าเบาๆ จนรู้สึกตึงด้านหลังต้นขา ค้างไว้" },
+  { id: "cd2", name: "ยืดหน้าอกและไหล่ (Chest & Shoulder Stretch)", seconds: 30,
+    how: "ประสานมือไว้ด้านหลังลำตัว ยกแขนขึ้นเบาๆ เปิดหน้าอก ค้างไว้แล้วหายใจลึกๆ" },
+  { id: "cd3", name: "ยืดหลังส่วนล่าง (Child's Pose)", seconds: 30,
+    how: "คุกเข่าแล้วนั่งลงบนส้นเท้า ก้มตัวไปข้างหน้าเหยียดแขนตรง ผ่อนคลายหลังส่วนล่าง" },
+  { id: "cd4", name: "หายใจลึกๆ ผ่อนคลาย (Deep Breathing)", seconds: 30,
+    how: "นั่งหรือนอนสบายๆ หายใจเข้าลึกทางจมูก 4 วินาที ค้าง 2 วินาที หายใจออกยาว 6 วินาที" },
+];
+
+// ===================== DATE / WEEK HELPERS =====================
+function getWeekStart(d) {
+  const date = new Date(d || new Date());
+  const day = date.getDay(); // 0 Sun .. 6 Sat
+  const diff = (day === 0 ? -6 : 1) - day; // Monday as week start
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+function isThisWeek(dateStr) {
+  const d = new Date(dateStr);
+  const start = getWeekStart();
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return d >= start && d < end;
+}
+// Monday-based week key, e.g. "2026-08-10" — used to group completedLog entries by week.
+function weekKeyOf(dateStr) {
+  return getWeekStart(dateStr).toISOString().slice(0, 10);
+}
+
+// ===================== ADHERENCE / STREAK / ACHIEVEMENTS =====================
+// All derived purely from completedLog — nothing here is stored separately, so it
+// can never drift out of sync with the actual completion history.
+function computeAdherenceStats(completedLog, daysPerWeek) {
+  const target = Math.max(1, Number(daysPerWeek) || 3);
+  const byWeek = {};
+  completedLog.forEach((c) => {
+    const wk = weekKeyOf(c.date);
+    byWeek[wk] = byWeek[wk] || new Set();
+    byWeek[wk].add(c.dayIndex + "|" + c.date); // count each real workout day once
+  });
+  const weekKeys = Object.keys(byWeek).sort(); // ascending
+  const weekCounts = weekKeys.map((wk) => byWeek[wk].size);
+  const totalCompleted = completedLog.length;
+  const bestWeekCompleted = weekCounts.length ? Math.max(...weekCounts) : 0;
+
+  // streakWeeks: consecutive weeks (ending this week, going backward) that hit >=75% of target
+  const thisWk = weekKeyOf(new Date().toISOString());
+  let streakWeeks = 0;
+  let cursor = new Date(thisWk);
+  const need = Math.max(1, Math.ceil(target * 0.75));
+  // Only count the current week if it's already met; otherwise start from last week
+  // so an in-progress week doesn't break a real streak.
+  if (!byWeek[weekKeyOf(cursor.toISOString())] || byWeek[weekKeyOf(cursor.toISOString())].size < need) {
+    cursor.setDate(cursor.getDate() - 7);
+  }
+  while (true) {
+    const wk = weekKeyOf(cursor.toISOString());
+    const count = byWeek[wk] ? byWeek[wk].size : 0;
+    if (count >= need) {
+      streakWeeks++;
+      cursor.setDate(cursor.getDate() - 7);
+    } else break;
+    if (streakWeeks > 104) break; // safety cap (2 years)
+  }
+  return { totalCompleted, bestWeekCompleted, streakWeeks, weeksTrained: weekKeys.length };
+}
+
+const ACHIEVEMENTS = [
+  { id: "first", label: "ก้าวแรก", desc: "ออกกำลังกายสำเร็จครั้งแรก", check: (s) => s.totalCompleted >= 1 },
+  { id: "five", label: "เริ่มติดลม", desc: "ออกกำลังกายสะสมครบ 5 ครั้ง", check: (s) => s.totalCompleted >= 5 },
+  { id: "fullweek", label: "ครบสัปดาห์แรก", desc: "ทำครบตามเป้าหมายใน 1 สัปดาห์", check: (s, target) => s.bestWeekCompleted >= target },
+  { id: "streak2", label: "ต่อเนื่อง 2 สัปดาห์", desc: "รักษาความสม่ำเสมอ 2 สัปดาห์ติดต่อกัน", check: (s) => s.streakWeeks >= 2 },
+  { id: "streak4", label: "นักวินัย", desc: "รักษาความสม่ำเสมอ 4 สัปดาห์ติดต่อกัน", check: (s) => s.streakWeeks >= 4 },
+  { id: "twentyfive", label: "นักสู้ตัวยง", desc: "ออกกำลังกายสะสมครบ 25 ครั้ง", check: (s) => s.totalCompleted >= 25 },
+  { id: "fifty", label: "ระดับเทพ", desc: "ออกกำลังกายสะสมครบ 50 ครั้ง", check: (s) => s.totalCompleted >= 50 },
+];
+
+// Progressive overload: every 2 full weeks of consistent training (streakWeeks),
+// nudge the displayed rep target up slightly, per NASM/Mayo Clinic progressive-
+// overload guidance (SOURCES: nasm, mayo2). This only adjusts what's DISPLAYED —
+// it never mutates the sourced SET_REP_TABLE baseline.
+function computeProgression(streakWeeks) {
+  const steps = Math.min(3, Math.floor((streakWeeks || 0) / 2));
+  return { steps, note: steps > 0 ? `เพิ่มเป้าหมายจำนวนครั้งขึ้นเล็กน้อย เพราะฝึกสม่ำเสมอต่อเนื่อง ${streakWeeks} สัปดาห์ (ตามหลัก Progressive Overload)` : "" };
+}
+function applyProgressionToReps(repsStr, steps) {
+  if (!steps) return repsStr;
+  const m = /^(\d+)(-(\d+))?/.exec(repsStr);
+  if (!m) return repsStr;
+  const lo = Number(m[1]);
+  const hi = m[3] ? Number(m[3]) : lo;
+  return `${lo + steps}-${hi + steps}`;
+}
+// Session-only pain mitigation: halve the rep target for remaining sets (never
+// goes below 1). Does not touch the sourced SET_REP_TABLE baseline.
+function applyReduction(repsStr) {
+  const m = /^(\d+)(-(\d+))?/.exec(repsStr);
+  if (!m) return repsStr;
+  const lo = Math.max(1, Math.round(Number(m[1]) / 2));
+  const hi = m[3] ? Math.max(lo, Math.round(Number(m[3]) / 2)) : lo;
+  return lo === hi ? `${lo}` : `${lo}-${hi}`;
+}
+
+// ===================== EXERCISE SWAP =====================
+// Alternatives drawn from the same eligible pool, preferring the same movement
+// pattern first (closest substitute), excluding exercises already used elsewhere
+// that day and the exercise being replaced itself.
+function getSwapAlternatives(exerciseId, pool, usedIdsToday) {
+  const current = EXERCISES.find((e) => e.id === exerciseId);
+  if (!current) return [];
+  const used = new Set(usedIdsToday || []);
+  const candidates = pool.filter((ex) => ex.id !== exerciseId && !used.has(ex.id));
+  const samePattern = candidates.filter((ex) => ex.pattern === current.pattern);
+  const rest = candidates.filter((ex) => ex.pattern !== current.pattern);
+  return [...samePattern, ...rest].slice(0, 6);
+}
+
+// ===================== AI ANALYSIS CALL =====================
+// The AI is given ONLY a per-day candidate list drawn from the sourced exercise
+// database and is instructed to pick from it (never invent new exercises). Its
+// response is still re-validated by the caller against the same candidate list.
+// ===================== LOCAL PROGRAM SUMMARY (standalone build — no live API) =====================
+// The Claude.ai artifact version of this app calls the Anthropic API to write this
+// summary. That only works inside Claude.ai's artifact sandbox (it needs a proxied,
+// key-free endpoint) — a plain static page has no backend and no safe way to hold an
+// API key client-side, and api.anthropic.com does not accept direct browser requests
+// from arbitrary origins. So this standalone build writes the summary with a plain,
+// transparent template instead of a live model call. Exercise SELECTION itself was
+// never AI-generated in either version — it always comes from the deterministic,
+// sourced engine above.
+function generateLocalSummary(profile, plan, sr, split) {
+  const goalLabel = (GOALS.find((g) => g.id === profile.goal) || {}).label || "";
+  const levelLabel = (LEVELS.find((l) => l.id === profile.level) || {}).label || "";
+  const partLabels = (profile.bodyParts || []).map((id) => (BODY_PARTS.find((b) => b.id === id) || {}).label).filter(Boolean).join(", ");
+  const totalExercises = plan.reduce((s, d) => s + d.exercises.length, 0);
+
+  const summary = `โปรแกรมนี้จัดสำหรับเป้าหมาย${goalLabel} ระดับ${levelLabel} เน้น${partLabels || "หลายส่วนของร่างกาย"} รวม ${plan.length} วัน/สัปดาห์ ครั้งละประมาณ ${profile.duration} นาที (${totalExercises} ท่าตลอดสัปดาห์)`;
+
+  const rationale = `จำนวนเซตและครั้ง (${sr.sets} เซต x ${sr.reps} ครั้ง พัก ${sr.restSec} วินาที) คำนวณจากเป้าหมายและระดับประสบการณ์ของคุณตามแนวทางของ NASM และ Mayo Clinic ท่าออกกำลังกายแต่ละท่าคัดเลือกจากฐานข้อมูลที่มีแหล่งอ้างอิงจริงและกรองตามอุปกรณ์ที่คุณมี ไม่ได้ใช้เพียงส่วนสูงและน้ำหนักในการตัดสินใจ`;
+
+  const tips = [
+    "ฝึกฟอร์มให้ถูกต้องก่อนเพิ่มน้ำหนักหรือความหนัก",
+    "ดื่มน้ำให้เพียงพอและพักผ่อนให้เพียงพอระหว่างวันฝึก",
+    "หากรู้สึกเจ็บผิดปกติระหว่างเซสชัน ใช้ปุ่ม \"ท่านี้ทำให้เจ็บ\" เพื่อสลับหรือปรับลดได้ทันที",
+  ];
+
+  const safetyNote = profile.hasLimitation
+    ? "คุณระบุว่ามีข้อจำกัดทางร่างกาย ระบบเลี่ยงท่าที่มีความเสี่ยงสูงให้แล้ว แต่โปรดปรึกษาแพทย์หรือผู้เชี่ยวชาญก่อนเริ่มโปรแกรมนี้เสมอ"
+    : "";
+
+  return { summary, rationale, tips, safetyNote };
+}
+
+// ===================== PERSISTENT STORAGE HELPERS =====================
+async function loadKey(key, fallback) {
+  try {
+    const res = await window.storage.get(key, false);
+    if (res && typeof res.value === "string") return JSON.parse(res.value);
+    return fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+async function saveKey(key, value) {
+  try {
+    await window.storage.set(key, JSON.stringify(value), false);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+const EMPTY_PROFILE = {
+  name: "", age: "", gender: "", height: "", weight: "",
+  level: "", goal: "", bodyParts: [], equipment: ["none"], daysPerWeek: 3, duration: 45,
+  hasLimitation: false, limitationNote: "",
+};
+const GOAL_ICONS = { Flame, Dumbbell, Zap, HeartPulse };
+const GLOBAL_STYLES = `
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+:root{
+  --bg:#0B0D10; --surface:#15181C; --surface-2:#1B1F24; --surface-3:#20252B;
+  --border:#262B31; --border-soft:#1E2227;
+  --text:#F2F4F5; --text-dim:#9AA2AA; --text-mute:#5E6670;
+  --accent:#FF4A32; --accent-2:#FF6B4A; --accent-soft:rgba(255,74,50,0.14); --accent-border:rgba(255,74,50,0.4);
+  --success:#33D6A0; --success-soft:rgba(51,214,160,0.14);
+  --warn:#F5B942; --warn-soft:rgba(245,185,66,0.14);
+  --danger:#FF5C5C; --danger-soft:rgba(255,92,92,0.14);
+  --info:#4EA8FF; --info-soft:rgba(78,168,255,0.14);
+  --font-display:'Bebas Neue', sans-serif; --font-body:'Manrope', -apple-system, sans-serif; --font-mono:'IBM Plex Mono', monospace;
+  --radius:16px; --radius-sm:10px;
+}
+*{box-sizing:border-box;}
+.fp-root{font-family:var(--font-body); background:var(--bg); color:var(--text); min-height:100vh; -webkit-font-smoothing:antialiased;}
+.fp-root h1,.fp-root h2,.fp-root h3,.fp-root .fp-display{font-family:var(--font-display); letter-spacing:0.02em; font-weight:400;}
+.fp-mono{font-family:var(--font-mono);}
+.fp-shell{display:flex; min-height:100vh;}
+.fp-sidebar{width:232px; flex-shrink:0; background:var(--surface); border-right:1px solid var(--border-soft); padding:24px 14px; display:flex; flex-direction:column; gap:4px; position:sticky; top:0; height:100vh;}
+.fp-brand{display:flex; align-items:center; gap:10px; padding:6px 10px 22px 10px;}
+.fp-brand-mark{width:34px; height:34px; border-radius:9px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0;}
+.fp-brand-text{font-family:var(--font-display); font-size:22px; letter-spacing:0.03em; line-height:1;}
+.fp-brand-sub{font-size:10px; color:var(--text-mute); letter-spacing:0.08em; text-transform:uppercase; margin-top:2px;}
+.fp-nav-item{display:flex; align-items:center; gap:11px; padding:10px 12px; border-radius:10px; color:var(--text-dim); font-size:14px; font-weight:600; cursor:pointer; border:1px solid transparent; transition:background .15s,color .15s;}
+.fp-nav-item:hover{background:var(--surface-2); color:var(--text);}
+.fp-nav-item.active{background:var(--accent-soft); color:var(--accent-2); border-color:var(--accent-border);}
+.fp-nav-item svg{flex-shrink:0;}
+.fp-sidebar-foot{margin-top:auto; padding:10px; font-size:11px; color:var(--text-mute); line-height:1.5; border-top:1px solid var(--border-soft); padding-top:14px;}
+.fp-main{flex:1; min-width:0; padding:28px 32px 100px 32px;}
+.fp-page-head{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:22px; flex-wrap:wrap;}
+.fp-page-title{font-size:34px; line-height:1;}
+.fp-page-sub{color:var(--text-dim); font-size:13.5px; margin-top:6px; max-width:560px;}
+.fp-bottom-nav{display:none;}
+
+.fp-card{background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:20px;}
+.fp-card-title{font-size:13px; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:14px; display:flex; align-items:center; gap:8px;}
+.fp-grid{display:grid; gap:16px;}
+.fp-grid-2{grid-template-columns:repeat(2,1fr);}
+.fp-grid-3{grid-template-columns:repeat(3,1fr);}
+.fp-grid-4{grid-template-columns:repeat(4,1fr);}
+@media(max-width:900px){.fp-grid-2,.fp-grid-3,.fp-grid-4{grid-template-columns:1fr 1fr;}}
+@media(max-width:600px){.fp-grid-2,.fp-grid-3,.fp-grid-4{grid-template-columns:1fr;}}
+
+.fp-stat-num{font-family:var(--font-mono); font-size:30px; font-weight:600; line-height:1;}
+.fp-stat-label{color:var(--text-dim); font-size:12.5px; margin-top:6px;}
+
+.fp-btn{display:inline-flex; align-items:center; justify-content:center; gap:8px; font-family:var(--font-body); font-weight:700; font-size:14px; padding:11px 18px; border-radius:11px; border:1px solid transparent; cursor:pointer; transition:transform .1s, filter .15s, background .15s; white-space:nowrap;}
+.fp-btn:active{transform:scale(0.98);}
+.fp-btn:disabled{opacity:0.45; cursor:not-allowed;}
+.fp-btn-primary{background:var(--accent); color:#fff;}
+.fp-btn-primary:hover:not(:disabled){filter:brightness(1.08);}
+.fp-btn-ghost{background:transparent; border-color:var(--border); color:var(--text);}
+.fp-btn-ghost:hover:not(:disabled){background:var(--surface-2);}
+.fp-btn-soft{background:var(--surface-2); color:var(--text); border-color:var(--border-soft);}
+.fp-btn-soft:hover:not(:disabled){background:var(--surface-3);}
+.fp-btn-sm{padding:7px 12px; font-size:12.5px; border-radius:8px;}
+.fp-btn-block{width:100%;}
+
+.fp-badge{display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; padding:4px 9px; border-radius:999px; text-transform:uppercase; letter-spacing:0.03em;}
+.fp-badge-success{background:var(--success-soft); color:var(--success);}
+.fp-badge-warn{background:var(--warn-soft); color:var(--warn);}
+.fp-badge-danger{background:var(--danger-soft); color:var(--danger);}
+.fp-badge-info{background:var(--info-soft); color:var(--info);}
+.fp-badge-neutral{background:var(--surface-3); color:var(--text-dim);}
+.fp-badge-accent{background:var(--accent-soft); color:var(--accent-2);}
+
+.fp-field{display:flex; flex-direction:column; gap:6px; margin-bottom:16px;}
+.fp-label{font-size:12.5px; font-weight:700; color:var(--text-dim);}
+.fp-input,.fp-select{background:var(--surface-2); border:1px solid var(--border); color:var(--text); font-family:var(--font-body); font-size:14px; padding:11px 13px; border-radius:10px; outline:none; width:100%;}
+.fp-input:focus,.fp-select:focus{border-color:var(--accent-border); box-shadow:0 0 0 3px var(--accent-soft);}
+.fp-input::placeholder{color:var(--text-mute);}
+.fp-hint{font-size:11.5px; color:var(--text-mute);}
+.fp-error-box{background:var(--danger-soft); border:1px solid rgba(255,92,92,0.35); color:#FFB3B3; border-radius:12px; padding:13px 15px; font-size:13px; line-height:1.6; margin-bottom:18px;}
+.fp-error-box b{color:#fff;}
+
+.fp-chip{display:inline-flex; align-items:center; gap:8px; padding:10px 15px; border-radius:11px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-dim); font-size:13.5px; font-weight:600; cursor:pointer; transition:all .12s; user-select:none;}
+.fp-chip:hover{border-color:var(--accent-border);}
+.fp-chip.selected{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent-2);}
+.fp-chip-group{display:flex; flex-wrap:wrap; gap:9px;}
+
+.fp-progress-track{width:100%; height:9px; background:var(--surface-3); border-radius:999px; overflow:hidden;}
+.fp-progress-fill{height:100%; background:linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius:999px; transition:width .4s ease;}
+
+.fp-gauge{position:relative; width:132px; height:132px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+.fp-gauge-inner{position:absolute; inset:10px; background:var(--surface); border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center;}
+.fp-gauge-num{font-family:var(--font-mono); font-size:26px; font-weight:600;}
+.fp-gauge-label{font-size:10px; color:var(--text-dim); margin-top:2px;}
+
+.fp-tabbar{display:flex; gap:6px; overflow-x:auto; padding-bottom:4px; margin-bottom:18px;}
+.fp-tab{flex-shrink:0; padding:9px 16px; border-radius:10px; font-size:13.5px; font-weight:700; color:var(--text-dim); background:var(--surface-2); border:1px solid var(--border-soft); cursor:pointer;}
+.fp-tab.active{background:var(--accent); color:#fff; border-color:var(--accent);}
+
+.fp-ex-card{background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:18px; display:flex; flex-direction:column; gap:12px;}
+.fp-ex-head{display:flex; justify-content:space-between; align-items:flex-start; gap:10px;}
+.fp-ex-icon{width:38px; height:38px; border-radius:10px; background:var(--accent-soft); color:var(--accent-2); display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+.fp-ex-name{font-size:16px; font-weight:700; line-height:1.3;}
+.fp-ex-muscle{font-size:12px; color:var(--text-dim); margin-top:3px;}
+.fp-ex-stats{display:flex; gap:18px; padding:12px 0; border-top:1px solid var(--border-soft); border-bottom:1px solid var(--border-soft);}
+.fp-ex-stat-num{font-family:var(--font-mono); font-size:17px; font-weight:600;}
+.fp-ex-stat-label{font-size:10.5px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.04em;}
+.fp-ex-quickrow{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;}
+.fp-ex-demo-btn{display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:700; color:var(--accent-2); text-decoration:none; padding:6px 11px; border-radius:8px; background:var(--accent-soft); border:1px solid var(--accent-border);}
+.fp-ex-demo-btn:hover{filter:brightness(1.15);}
+.fp-ex-toggle{display:flex; align-items:center; gap:6px; align-self:flex-start; background:none; border:none; color:var(--text-dim); font-size:12.5px; font-weight:700; cursor:pointer; padding:2px 0; font-family:var(--font-body);}
+.fp-ex-toggle:hover{color:var(--text);}
+.fp-ex-steps{font-size:13px; color:var(--text-dim); line-height:1.9; padding-left:18px; margin:0;}
+.fp-ex-caution{display:flex; gap:8px; background:var(--warn-soft); border-radius:10px; padding:10px 12px; font-size:12.5px; color:#F3D18A; line-height:1.55; margin-top:10px;}
+.fp-ex-source{font-size:11.5px; color:var(--text-mute); display:flex; align-items:center; gap:5px; margin-top:10px;}
+.fp-ex-source a{color:var(--text-dim); text-decoration:none; border-bottom:1px dotted var(--text-mute);}
+.fp-ex-source a:hover{color:var(--accent-2);}
+
+.fp-week-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;}
+.fp-week-cell{background:var(--surface); border:1px solid var(--border-soft); border-radius:14px; padding:16px; cursor:pointer; transition:border-color .12s;}
+.fp-week-cell:hover{border-color:var(--accent-border);}
+.fp-week-cell.today{border-color:var(--accent); background:var(--accent-soft);}
+.fp-week-day{font-family:var(--font-display); font-size:20px; margin-bottom:4px;}
+.fp-week-focus{font-size:12.5px; color:var(--text-dim); min-height:32px;}
+.fp-week-meta{font-size:11px; color:var(--text-mute); margin-top:10px; font-family:var(--font-mono);}
+
+.fp-disclaimer{display:flex; gap:9px; align-items:flex-start; font-size:11.5px; color:var(--text-mute); line-height:1.6; padding:14px 16px; background:var(--surface-2); border-radius:12px; border:1px solid var(--border-soft); margin-top:24px;}
+.fp-disclaimer svg{flex-shrink:0; margin-top:1px;}
+
+.fp-ai-box{background:linear-gradient(160deg, var(--surface-2), var(--surface)); border:1px solid var(--accent-border); border-radius:var(--radius); padding:20px;}
+.fp-ai-head{display:flex; align-items:center; gap:9px; color:var(--accent-2); font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:12px;}
+.fp-ai-summary{font-size:14.5px; line-height:1.7; color:var(--text);}
+.fp-ai-tip{display:flex; gap:9px; font-size:13px; color:var(--text-dim); line-height:1.6; padding:8px 0;}
+
+.fp-empty{text-align:center; padding:50px 20px; color:var(--text-dim);}
+.fp-spin{animation:fpspin 0.9s linear infinite;}
+@keyframes fpspin{from{transform:rotate(0);}to{transform:rotate(360deg);}}
+@keyframes fpfade{from{opacity:0; transform:translateY(6px);}to{opacity:1; transform:translateY(0);}}
+.fp-fade-in{animation:fpfade .35s ease both;}
+
+.fp-toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--surface-3); border:1px solid var(--border); color:var(--text); padding:11px 18px; border-radius:11px; font-size:13px; font-weight:600; display:flex; align-items:center; gap:8px; z-index:50; box-shadow:0 8px 24px rgba(0,0,0,0.4);}
+
+/* ---- Session mode (guided workout) ---- */
+.fp-session{min-height:100vh; display:flex; flex-direction:column; max-width:640px; margin:0 auto; padding:20px 20px 40px 20px;}
+.fp-session-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:22px;}
+.fp-session-exit{background:none; border:none; color:var(--text-mute); cursor:pointer; display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700;}
+.fp-session-progress{font-family:var(--font-mono); font-size:12.5px; color:var(--text-dim);}
+.fp-session-stage{font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent-2); text-align:center; margin-bottom:8px;}
+.fp-session-card{background:var(--surface); border:1px solid var(--border-soft); border-radius:20px; padding:28px 24px; text-align:center; flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;}
+.fp-session-name{font-size:26px; font-weight:700; line-height:1.25;}
+.fp-session-icon-big{width:64px; height:64px; border-radius:18px; background:var(--accent-soft); color:var(--accent-2); display:flex; align-items:center; justify-content:center;}
+.fp-session-setinfo{display:flex; gap:28px; margin:6px 0;}
+.fp-session-setinfo div{text-align:center;}
+.fp-session-setinfo .fp-num{font-family:var(--font-mono); font-size:30px; font-weight:600;}
+.fp-session-setinfo .fp-lbl{font-size:11px; color:var(--text-mute); text-transform:uppercase; letter-spacing:0.04em; margin-top:2px;}
+.fp-timer-ring{width:180px; height:180px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin:8px 0;}
+.fp-timer-inner{width:156px; height:156px; border-radius:50%; background:var(--surface); display:flex; flex-direction:column; align-items:center; justify-content:center;}
+.fp-timer-num{font-family:var(--font-mono); font-size:44px; font-weight:600;}
+.fp-timer-lbl{font-size:12px; color:var(--text-dim); margin-top:4px;}
+.fp-session-actions{display:flex; flex-direction:column; gap:10px; width:100%; margin-top:10px;}
+.fp-session-hurt{background:none; border:1px solid var(--warn); color:var(--warn); border-radius:11px; padding:9px 14px; font-size:12.5px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; gap:6px; align-self:center;}
+.fp-pain-panel{background:var(--surface-2); border:1px solid var(--warn); border-radius:16px; padding:18px; text-align:left; width:100%;}
+.fp-log-row{display:flex; gap:10px; width:100%; align-items:flex-end;}
+.fp-session-done{display:flex; flex-direction:column; align-items:center; gap:16px; text-align:center; flex:1; justify-content:center;}
+
+/* ---- Welcome / onboarding screen ---- */
+.fp-login-shell{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; background:radial-gradient(circle at 50% 0%, var(--surface-2), var(--bg) 70%);}
+.fp-login-card{width:100%; max-width:380px; background:var(--surface); border:1px solid var(--border-soft); border-radius:22px; padding:36px 30px;}
+.fp-login-mark{width:60px; height:60px; border-radius:18px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#fff; margin:0 auto 18px auto;}
+.fp-login-title{font-family:var(--font-display); font-size:36px; text-align:center; letter-spacing:0.03em; line-height:1;}
+.fp-login-sub{text-align:center; color:var(--text-dim); font-size:13px; margin:8px 0 28px 0; line-height:1.6;}
+
+@media(max-width:860px){
+  .fp-sidebar{display:none;}
+  .fp-main{padding:20px 16px 90px 16px;}
+  .fp-bottom-nav{display:flex; position:fixed; bottom:0; left:0; right:0; background:var(--surface); border-top:1px solid var(--border-soft); padding:8px 4px; z-index:40; justify-content:space-around;}
+  .fp-bottom-item{display:flex; flex-direction:column; align-items:center; gap:3px; color:var(--text-mute); font-size:9.5px; font-weight:700; padding:6px 4px; cursor:pointer; flex:1;}
+  .fp-bottom-item.active{color:var(--accent-2);}
+  .fp-page-title{font-size:27px;}
+}
+
+/* ---- Print / "save as PDF" — flips the dark theme to print-friendly light via
+   the same CSS variables everything else already uses, hides interactive chrome,
+   and swaps the single-day tabbed view for a flat all-days printable list. ---- */
+.fp-print-only{display:none;}
+@media print{
+  :root{
+    --bg:#fff; --surface:#fff; --surface-2:#fff; --surface-3:#f2f2f2;
+    --border:#ccc; --border-soft:#ddd; --text:#111; --text-dim:#333; --text-mute:#555;
+    --accent:#B5321F; --accent-2:#B5321F; --accent-soft:#f7e6e3;
+    --success:#1E7A4C; --success-soft:#eafaf1; --warn:#8A6100; --warn-soft:#fff6e0;
+  }
+  .fp-sidebar, .fp-bottom-nav, .fp-toast, .fp-print-hide{display:none !important;}
+  .fp-main{padding:0 !important;}
+  .fp-shell{display:block !important;}
+  .fp-print-only{display:block !important;}
+  .fp-ex-card, .fp-card{break-inside:avoid; border:1px solid #ccc !important;}
+  .fp-print-day{break-after:page;}
+  .fp-print-day:last-child{break-after:auto;}
+  a{color:#111 !important; text-decoration:underline !important;}
+}
+`;
+
+// ===================== NAV =====================
+const NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", icon: Home },
+  { id: "profile", label: "Profile", icon: User },
+  { id: "setup", label: "Workout Setup", icon: SlidersHorizontal },
+  { id: "plan", label: "AI Workout Plan", icon: Sparkles },
+  { id: "schedule", label: "Weekly Schedule", icon: CalendarDays },
+  { id: "progress", label: "Progress", icon: TrendingUp },
+];
+
+function Sidebar({ view, setView }) {
+  return (
+    <aside className="fp-sidebar">
+      <div className="fp-brand">
+        <div className="fp-brand-mark"><Dumbbell size={18} /></div>
+        <div>
+          <div className="fp-brand-text">FITFORGE</div>
+          <div className="fp-brand-sub">AI Workout Planner</div>
+        </div>
+      </div>
+      {NAV_ITEMS.map((item) => {
+        const Icon = item.icon;
+        return (
+          <div
+            key={item.id}
+            className={"fp-nav-item" + (view === item.id ? " active" : "")}
+            onClick={() => setView(item.id)}
+          >
+            <Icon size={17} />
+            {item.label}
+          </div>
+        );
+      })}
+      <div className="fp-sidebar-foot">
+        ข้อมูลทั่วไปเพื่อการออกกำลังกาย ไม่ใช่คำแนะนำทางการแพทย์ โปรดปรึกษาผู้เชี่ยวชาญหากมีความเสี่ยงด้านสุขภาพ
+      </div>
+    </aside>
+  );
+}
+
+function BottomNav({ view, setView }) {
+  return (
+    <nav className="fp-bottom-nav">
+      {NAV_ITEMS.map((item) => {
+        const Icon = item.icon;
+        return (
+          <div
+            key={item.id}
+            className={"fp-bottom-item" + (view === item.id ? " active" : "")}
+            onClick={() => setView(item.id)}
+          >
+            <Icon size={18} />
+            <span>{item.label.split(" ")[0]}</span>
+          </div>
+        );
+      })}
+    </nav>
+  );
+}
+
+// ===================== SIGNATURE RADIAL GAUGE =====================
+function Gauge({ pct, value, label }) {
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  const style = { background: `conic-gradient(var(--accent) ${clamped * 3.6}deg, var(--surface-3) 0deg)` };
+  return (
+    <div className="fp-gauge" style={style}>
+      <div className="fp-gauge-inner">
+        <div className="fp-gauge-num fp-mono">{value}</div>
+        <div className="fp-gauge-label">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== MOVEMENT-PATTERN PICTOGRAM (original geometric icons) =====================
+// Small abstract glyphs — not photos — used so exercise cards are scannable at a
+// glance without relying on hotlinked third-party images.
+const PATTERN_LABEL = { push: "ท่าดัน", pull: "ท่าดึง", squat: "ท่าย่อ/สควอท", hinge: "ท่าก้ม-เหยียดสะโพก", core: "แกนกลางลำตัว", raise: "ท่ายกแขน", dynamic: "เคลื่อนไหวต่อเนื่อง" };
+
+function PatternIcon({ pattern, size = 22 }) {
+  const common = { width: size, height: size, viewBox: "0 0 40 40", fill: "none", stroke: "currentColor", strokeWidth: 2.6, strokeLinecap: "round", strokeLinejoin: "round" };
+  switch (pattern) {
+    case "push":
+      return (<svg {...common}><line x1="9" y1="20" x2="9" y2="20" /><line x1="9" y1="10" x2="9" y2="30" /><line x1="12" y1="20" x2="30" y2="20" /><polyline points="23,13 30,20 23,27" /></svg>);
+    case "pull":
+      return (<svg {...common}><line x1="31" y1="10" x2="31" y2="30" /><line x1="28" y1="20" x2="10" y2="20" /><polyline points="17,13 10,20 17,27" /></svg>);
+    case "squat":
+      return (<svg {...common}><polyline points="9,12 20,30 31,12" /></svg>);
+    case "hinge":
+      return (<svg {...common}><polyline points="12,8 12,22 31,30" /></svg>);
+    case "core":
+      return (<svg {...common}><rect x="7" y="17" width="26" height="6" rx="3" /><circle cx="20" cy="20" r="2.6" fill="currentColor" stroke="none" /></svg>);
+    case "raise":
+      return (<svg {...common}><line x1="10" y1="31" x2="27" y2="10" /><polyline points="17,10 27,10 27,20" /></svg>);
+    case "dynamic":
+      return (<svg {...common} strokeWidth="0"><path d="M20 5 L11 21 L18 21 L15 35 L30 16 L21 16 Z" fill="currentColor" /></svg>);
+    default:
+      return (<svg {...common}><circle cx="20" cy="20" r="10" /></svg>);
+  }
+}
+
+// ===================== EXERCISE CARD =====================
+const DIFF_TONE = { beginner: "success", intermediate: "warn", advanced: "danger" };
+const DIFF_LABEL = { beginner: "มือใหม่", intermediate: "ปานกลาง", advanced: "ระดับสูง" };
+
+function ExerciseCard({ ex, sr, alternatives, onSwap }) {
+  const [open, setOpen] = useState(false);
+  const [showSwap, setShowSwap] = useState(false);
+  const source = SOURCES.find((s) => s.id === ex.sourceId);
+  const equipLabel = ex.equipmentTags.includes("none")
+    ? "ไม่ใช้อุปกรณ์"
+    : ex.equipmentTags.map((t) => (EQUIPMENT.find((e) => e.id === t) || {}).label || t).join(" + ");
+
+  return (
+    <div className="fp-ex-card">
+      <div className="fp-ex-head">
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", minWidth: 0 }}>
+          <div className="fp-ex-icon" title={PATTERN_LABEL[ex.pattern]}><PatternIcon pattern={ex.pattern} /></div>
+          <div style={{ minWidth: 0 }}>
+            <div className="fp-ex-name">{ex.name}</div>
+            <div className="fp-ex-muscle">{ex.primary}</div>
+          </div>
+        </div>
+        <span className={`fp-badge fp-badge-${DIFF_TONE[ex.difficulty]}`} style={{ flexShrink: 0 }}>{DIFF_LABEL[ex.difficulty]}</span>
+      </div>
+
+      <div className="fp-ex-stats">
+        <div><div className="fp-ex-stat-num fp-mono">{sr.sets}</div><div className="fp-ex-stat-label">เซต</div></div>
+        <div><div className="fp-ex-stat-num fp-mono">{sr.reps}</div><div className="fp-ex-stat-label">ครั้ง/เซต</div></div>
+        <div><div className="fp-ex-stat-num fp-mono">{sr.restSec}s</div><div className="fp-ex-stat-label">พักระหว่างเซต</div></div>
+      </div>
+
+      <div className="fp-ex-quickrow">
+        <span className="fp-badge fp-badge-neutral"><Wrench size={11} /> {equipLabel}</span>
+        {source && (
+          <a className="fp-ex-demo-btn" href={ex.sourceUrl} target="_blank" rel="noopener noreferrer">
+            <ImageIcon size={13} /> ดูรูปสาธิตท่านี้
+          </a>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        <button className="fp-ex-toggle" onClick={() => setOpen((v) => !v)}>
+          {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {open ? "ซ่อนวิธีทำ" : "ดูวิธีทำทีละขั้นตอน"}
+        </button>
+        {onSwap && (
+          <button className="fp-ex-toggle" onClick={() => setShowSwap((v) => !v)}>
+            <Repeat size={14} /> สลับท่า
+          </button>
+        )}
+      </div>
+
+      {showSwap && onSwap && (
+        <div className="fp-fade-in" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {alternatives && alternatives.length > 0 ? (
+            alternatives.map((alt) => (
+              <button key={alt.id} className="fp-btn fp-btn-soft fp-btn-sm" style={{ justifyContent: "flex-start" }}
+                onClick={() => { onSwap(alt.id); setShowSwap(false); }}>
+                <PatternIcon pattern={alt.pattern} size={15} /> {alt.name}
+              </button>
+            ))
+          ) : (
+            <div className="fp-hint">ไม่พบท่าทดแทนที่เหมาะกับอุปกรณ์/ระดับของคุณตอนนี้</div>
+          )}
+        </div>
+      )}
+
+      {open && (
+        <div className="fp-fade-in">
+          <ol className="fp-ex-steps">
+            {ex.how.map((step, i) => <li key={i}>{step}</li>)}
+          </ol>
+          <div className="fp-ex-caution"><AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {ex.caution}</div>
+          {source && (
+            <div className="fp-ex-source">
+              <ExternalLink size={11} /> อ้างอิง: <a href={ex.sourceUrl} target="_blank" rel="noopener noreferrer">{source.name}</a>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===================== DASHBOARD =====================
+function DashboardView({ profile, bmi, bmiCat, isProfileComplete, plan, split, completedLog, setView, onMarkComplete, onStartSession, adherenceStats }) {
+  const weekCompleted = completedLog.filter((c) => isThisWeek(c.date)).length;
+  const totalDays = split.length || Number(profile.daysPerWeek) || 0;
+  const pct = totalDays ? Math.min(100, Math.round((weekCompleted / totalDays) * 100)) : 0;
+  const nextDay = plan.find((d) => !completedLog.some((c) => c.dayIndex === d.dayIndex && isThisWeek(c.date)));
+  const goalLabel = (GOALS.find((g) => g.id === profile.goal) || {}).label || "-";
+  const levelLabel = (LEVELS.find((l) => l.id === profile.level) || {}).label || "-";
+  const gaugePct = bmi ? Math.min(100, Math.max(0, ((bmi - 15) / (35 - 15)) * 100)) : 0;
+
+  return (
+    <div className="fp-fade-in">
+      <div className="fp-page-head">
+        <div>
+          <h1 className="fp-page-title">{profile.name ? `สวัสดี, ${profile.name}` : "Dashboard"}</h1>
+          <div className="fp-page-sub">ภาพรวมสุขภาพและโปรแกรมออกกำลังกายของคุณ</div>
+        </div>
+      </div>
+
+      {!isProfileComplete && (
+        <div className="fp-card" style={{ marginBottom: 20, borderColor: "var(--accent-border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <AlertTriangle size={20} color="var(--accent-2)" />
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ fontWeight: 700, marginBottom: 3 }}>กรอกข้อมูลส่วนตัวให้ครบก่อนเริ่มใช้งาน</div>
+              <div style={{ fontSize: 13, color: "var(--text-dim)" }}>
+                ระบบต้องใช้ส่วนสูง น้ำหนัก อายุ เพศ และเป้าหมาย เพื่อสร้างโปรแกรมที่เหมาะกับคุณโดยเฉพาะ
+              </div>
+            </div>
+            <button className="fp-btn fp-btn-primary" onClick={() => setView("profile")}>
+              ไปกรอกข้อมูล <ChevronRight size={15} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="fp-grid fp-grid-3" style={{ marginBottom: 20 }}>
+        <div className="fp-card" style={{ display: "flex", alignItems: "center", gap: 18 }}>
+          <Gauge pct={gaugePct} value={bmi ? bmi.toFixed(1) : "--"} label="BMI" />
+          <div>
+            <div className="fp-card-title" style={{ marginBottom: 8 }}><Ruler size={14} /> BMI (เกณฑ์เอเชีย)</div>
+            {bmiCat ? (
+              <span className={`fp-badge fp-badge-${bmiCat.tone}`}>{bmiCat.label}</span>
+            ) : (
+              <span className="fp-badge fp-badge-neutral">ยังไม่มีข้อมูล</span>
+            )}
+            <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 8, lineHeight: 1.5 }}>
+              คัดกรองเบื้องต้นเท่านั้น ไม่ใช่การวินิจฉัย
+            </div>
+          </div>
+        </div>
+        <div className="fp-card">
+          <div className="fp-card-title"><Target size={14} /> เป้าหมาย & ระดับ</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div><span className="fp-badge fp-badge-accent">{goalLabel}</span></div>
+            <div><span className="fp-badge fp-badge-neutral">ระดับ: {levelLabel}</span></div>
+          </div>
+        </div>
+        <div className="fp-card">
+          <div className="fp-card-title"><ClipboardList size={14} /> ความคืบหน้าสัปดาห์นี้</div>
+          <div className="fp-stat-num fp-mono">{weekCompleted}<span style={{ fontSize: 16, color: "var(--text-mute)" }}>/{totalDays || "-"}</span></div>
+          <div className="fp-progress-track" style={{ marginTop: 10 }}><div className="fp-progress-fill" style={{ width: pct + "%" }} /></div>
+          <div className="fp-stat-label" style={{ marginTop: 8 }}>วันฝึกที่ทำสำเร็จในสัปดาห์นี้</div>
+        </div>
+      </div>
+
+      <div className="fp-card">
+        <div className="fp-card-title"><Sparkles size={14} /> Workout ถัดไป</div>
+        {plan.length === 0 ? (
+          <div className="fp-empty">
+            <p>ยังไม่มีโปรแกรมออกกำลังกาย</p>
+            <button className="fp-btn fp-btn-primary" style={{ marginTop: 10 }} onClick={() => setView("setup")}>
+              ตั้งค่า & สร้างโปรแกรมด้วย AI
+            </button>
+          </div>
+        ) : nextDay ? (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 19, fontWeight: 700 }}>{nextDay.dayLabel} — {nextDay.focus}</div>
+              <div style={{ fontSize: 13, color: "var(--text-dim)", marginTop: 4 }}>{nextDay.exercises.length} ท่าออกกำลังกาย</div>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="fp-btn fp-btn-soft" onClick={() => onMarkComplete(nextDay.dayIndex, nextDay.dayLabel)}>
+                <Save size={15} /> บันทึก Workout
+              </button>
+              <button className="fp-btn fp-btn-primary" onClick={() => onStartSession(nextDay.dayIndex)}>
+                <Play size={15} /> เริ่ม Workout
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="fp-empty">
+            <CheckCircle2 size={26} color="var(--success)" />
+            <p style={{ marginTop: 8 }}>ทำครบทุกวันของสัปดาห์นี้แล้ว เยี่ยมมาก!</p>
+          </div>
+        )}
+      </div>
+
+      {adherenceStats && adherenceStats.totalCompleted > 0 && (
+        <div className="fp-card" style={{ marginTop: 20 }}>
+          <div className="fp-card-title"><Trophy size={14} /> ความสม่ำเสมอ</div>
+          <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+            <div><div className="fp-stat-num fp-mono">{adherenceStats.streakWeeks}</div><div className="fp-stat-label">สัปดาห์ต่อเนื่อง</div></div>
+            <div><div className="fp-stat-num fp-mono">{adherenceStats.totalCompleted}</div><div className="fp-stat-label">Workout สะสม</div></div>
+          </div>
+          <button className="fp-btn fp-btn-ghost fp-btn-sm" style={{ marginTop: 12 }} onClick={() => setView("progress")}>ดูความสำเร็จทั้งหมด <ChevronRight size={13} /></button>
+        </div>
+      )}
+
+      <div className="fp-disclaimer">
+        <Info size={15} />
+        <span>
+          เว็บไซต์นี้ให้ข้อมูลทั่วไปเพื่อการออกกำลังกาย ไม่ใช่คำแนะนำทางการแพทย์ ไม่วินิจฉัยหรือรักษาโรค
+          และไม่รับประกันผลลัพธ์ด้านสุขภาพหรือน้ำหนัก หากมีอาการบาดเจ็บหรือโรคประจำตัว โปรดปรึกษาแพทย์หรือผู้เชี่ยวชาญก่อนเริ่มโปรแกรม
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ===================== PROFILE =====================
+function ProfileView({ draft, setDraft, onSave, bmi, bmiCat, showToast }) {
+  function update(field, value) { setDraft({ ...draft, [field]: value }); }
+  function submit() {
+    const errs = [];
+    if (!draft.age || draft.age < 13 || draft.age > 100) errs.push("อายุ");
+    if (!draft.gender) errs.push("เพศ");
+    if (!draft.height || draft.height < 100 || draft.height > 250) errs.push("ส่วนสูง");
+    if (!draft.weight || draft.weight < 30 || draft.weight > 250) errs.push("น้ำหนัก");
+    if (errs.length) { showToast("ตรวจสอบข้อมูล: " + errs.join(", ")); return; }
+    onSave(draft);
+  }
+  const gaugePct = bmi ? Math.min(100, Math.max(0, ((bmi - 15) / (35 - 15)) * 100)) : 0;
+  return (
+    <div className="fp-fade-in">
+      <div className="fp-page-head">
+        <div><h1 className="fp-page-title">Profile</h1><div className="fp-page-sub">ข้อมูลส่วนตัวใช้คำนวณ BMI และปรับโปรแกรมให้เหมาะกับคุณ</div></div>
+      </div>
+      <div className="fp-grid fp-grid-2">
+        <div className="fp-card">
+          <div className="fp-field">
+            <label className="fp-label">ชื่อเล่น (ไม่บังคับ)</label>
+            <input className="fp-input" value={draft.name} onChange={(e) => update("name", e.target.value)} placeholder="เช่น ต้น" />
+          </div>
+          <div className="fp-grid fp-grid-2">
+            <div className="fp-field">
+              <label className="fp-label">อายุ (ปี) *</label>
+              <input className="fp-input" type="number" value={draft.age} onChange={(e) => update("age", e.target.value)} placeholder="เช่น 25" />
+            </div>
+            <div className="fp-field">
+              <label className="fp-label">เพศ *</label>
+              <select className="fp-select" value={draft.gender} onChange={(e) => update("gender", e.target.value)}>
+                <option value="">เลือกเพศ</option>
+                <option value="male">ชาย</option>
+                <option value="female">หญิง</option>
+                <option value="other">ไม่ระบุ</option>
+              </select>
+            </div>
+          </div>
+          <div className="fp-grid fp-grid-2">
+            <div className="fp-field">
+              <label className="fp-label">ส่วนสูง (ซม.) *</label>
+              <input className="fp-input" type="number" value={draft.height} onChange={(e) => update("height", e.target.value)} placeholder="เช่น 170" />
+            </div>
+            <div className="fp-field">
+              <label className="fp-label">น้ำหนัก (กก.) *</label>
+              <input className="fp-input" type="number" value={draft.weight} onChange={(e) => update("weight", e.target.value)} placeholder="เช่น 65" />
+            </div>
+          </div>
+          {draft.age && Number(draft.age) < 18 && (
+            <div className="fp-hint" style={{ marginBottom: 12 }}>
+              ผู้ที่อายุต่ำกว่า 18 ปี ควรออกกำลังกายภายใต้คำแนะนำของผู้ปกครองหรือผู้เชี่ยวชาญ
+            </div>
+          )}
+          <button className="fp-btn fp-btn-primary fp-btn-block" onClick={submit}><Save size={16} /> บันทึกข้อมูล</button>
+        </div>
+        <div className="fp-card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
+          <Gauge pct={gaugePct} value={bmi ? bmi.toFixed(1) : "--"} label="BMI" />
+          {bmiCat ? (
+            <span className={`fp-badge fp-badge-${bmiCat.tone}`}>{bmiCat.label}</span>
+          ) : (
+            <span className="fp-badge fp-badge-neutral">กรอกส่วนสูง/น้ำหนัก</span>
+          )}
+          <div style={{ fontSize: 12, color: "var(--text-mute)", textAlign: "center", lineHeight: 1.6, maxWidth: 240 }}>
+            ใช้เกณฑ์ WHO Asia-Pacific (18.5 / 23 / 25 / 30) ซึ่งเหมาะสำหรับประชากรเอเชีย เป็นเครื่องมือคัดกรองเบื้องต้น ไม่ใช่การวินิจฉัยทางการแพทย์
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== SETUP =====================
+function SetupView({ draft, setDraft, onSave, onGenerate, aiStatus, missing }) {
+  const bodyParts = draft.bodyParts || [];
+  const equipment = draft.equipment || [];
+  function update(field, value) { const next = { ...draft, [field]: value }; setDraft(next); onSave(next); }
+  function toggleBodyPart(id) {
+    const has = bodyParts.includes(id);
+    const next = has ? bodyParts.filter((p) => p !== id) : [...bodyParts, id];
+    update("bodyParts", next);
+  }
+  function toggleEquipment(id) {
+    const has = equipment.includes(id);
+    const next = has ? equipment.filter((e) => e !== id) : [...equipment, id];
+    update("equipment", next);
+  }
+  return (
+    <div className="fp-fade-in">
+      <div className="fp-page-head">
+        <div><h1 className="fp-page-title">Workout Setup</h1><div className="fp-page-sub">เลือกส่วนที่ต้องการเน้น เป้าหมาย และรูปแบบการฝึกของคุณ</div></div>
+      </div>
+
+      {missing.length > 0 && (
+        <div className="fp-error-box"><b>ข้อมูลยังไม่ครบ:</b> กรุณากรอก {missing.join(", ")} ก่อนสร้างโปรแกรม</div>
+      )}
+
+      <div className="fp-card" style={{ marginBottom: 16 }}>
+        <div className="fp-card-title"><Target size={14} /> เป้าหมายการออกกำลังกาย</div>
+        <div className="fp-chip-group">
+          {GOALS.map((g) => {
+            const Icon = GOAL_ICONS[g.icon];
+            return (
+              <div key={g.id} className={"fp-chip" + (draft.goal === g.id ? " selected" : "")} onClick={() => update("goal", g.id)}>
+                <Icon size={15} /> {g.label}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 16 }}>
+        <div className="fp-card-title"><Dumbbell size={14} /> ระดับประสบการณ์</div>
+        <div className="fp-chip-group">
+          {LEVELS.map((l) => (
+            <div key={l.id} className={"fp-chip" + (draft.level === l.id ? " selected" : "")} onClick={() => update("level", l.id)}>{l.label}</div>
+          ))}
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 16 }}>
+        <div className="fp-card-title"><ClipboardList size={14} /> ส่วนของร่างกายที่ต้องการเน้น (เลือกได้หลายส่วน)</div>
+        <div className="fp-chip-group">
+          {BODY_PARTS.map((b) => (
+            <div key={b.id} className={"fp-chip" + (bodyParts.includes(b.id) ? " selected" : "")} onClick={() => toggleBodyPart(b.id)}>{b.label}</div>
+          ))}
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 16 }}>
+        <div className="fp-card-title"><Wrench size={14} /> อุปกรณ์ที่มี (เลือกเพิ่มเติมจากตัวเปล่า)</div>
+        <div className="fp-chip-group">
+          <div className="fp-chip selected" style={{ cursor: "default", opacity: 0.75 }}>ไม่ใช้อุปกรณ์ (รวมเสมอ)</div>
+          {EQUIPMENT.filter((e) => e.id !== "none").map((e) => (
+            <div key={e.id} className={"fp-chip" + (equipment.includes(e.id) ? " selected" : "")} onClick={() => toggleEquipment(e.id)}>{e.label}</div>
+          ))}
+        </div>
+        <div className="fp-hint" style={{ marginTop: 10 }}>
+          ระบบจะเลือกท่าที่ใช้ได้กับอุปกรณ์ที่คุณมีเท่านั้น ไม่เลือกอุปกรณ์เพิ่ม = ใช้ท่าไม่ใช้อุปกรณ์ล้วน
+        </div>
+      </div>
+
+      <div className="fp-grid fp-grid-2" style={{ marginBottom: 16 }}>
+        <div className="fp-card">
+          <div className="fp-card-title"><CalendarDays size={14} /> จำนวนวัน/สัปดาห์</div>
+          <div className="fp-chip-group">
+            {[2, 3, 4, 5, 6].map((d) => (
+              <div key={d} className={"fp-chip" + (Number(draft.daysPerWeek) === d ? " selected" : "")} onClick={() => update("daysPerWeek", d)}>{d} วัน</div>
+            ))}
+          </div>
+        </div>
+        <div className="fp-card">
+          <div className="fp-card-title"><Clock size={14} /> เวลาต่อครั้ง</div>
+          <div className="fp-chip-group">
+            {[30, 45, 60, 90].map((d) => (
+              <div key={d} className={"fp-chip" + (Number(draft.duration) === d ? " selected" : "")} onClick={() => update("duration", d)}>{d} นาที</div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 20 }}>
+        <div className="fp-card-title"><ShieldAlert size={14} /> ข้อจำกัดทางร่างกาย</div>
+        <div className="fp-chip-group" style={{ marginBottom: draft.hasLimitation ? 12 : 0 }}>
+          <div className={"fp-chip" + (draft.hasLimitation ? " selected" : "")} onClick={() => update("hasLimitation", !draft.hasLimitation)}>
+            {draft.hasLimitation ? <CheckCircle2 size={15} /> : null} มีอาการบาดเจ็บ / ข้อจำกัดทางร่างกาย
+          </div>
+        </div>
+        {draft.hasLimitation && (
+          <>
+            <textarea
+              className="fp-input" rows={3}
+              placeholder="ระบุอาการหรือข้อจำกัด เช่น ปวดเข่า / ปวดหลังส่วนล่าง (ไม่บังคับ)"
+              value={draft.limitationNote} onChange={(e) => update("limitationNote", e.target.value)}
+            />
+            <div className="fp-hint" style={{ marginTop: 8 }}>
+              ระบบจะหลีกเลี่ยงท่าที่มีความเสี่ยงสูงให้อัตโนมัติ แต่โปรดปรึกษาแพทย์หรือผู้เชี่ยวชาญก่อนเริ่มโปรแกรมเสมอ
+            </div>
+          </>
+        )}
+      </div>
+
+      <button
+        className="fp-btn fp-btn-primary fp-btn-block"
+        disabled={missing.length > 0 || aiStatus === "loading"}
+        onClick={onGenerate}
+      >
+        {aiStatus === "loading" ? (<><Loader2 size={16} className="fp-spin" /> กำลังสร้างโปรแกรม...</>) : (<><Sparkles size={16} /> สร้างโปรแกรมด้วย AI</>)}
+      </button>
+    </div>
+  );
+}
+
+// ===================== AI WORKOUT PLAN =====================
+// ===================== PRINTABLE WEEKLY PLAN (for window.print() / save-as-PDF) =====================
+function PrintableWeeklyPlan({ plan, profile, adherenceStats }) {
+  const progression = adherenceStats ? computeProgression(adherenceStats.streakWeeks) : { steps: 0 };
+  const sr0 = (SET_REP_TABLE[profile.goal] && SET_REP_TABLE[profile.goal][profile.level]) || { sets: 3, reps: "10-12", restSec: 60 };
+  const sr = { ...sr0, reps: applyProgressionToReps(sr0.reps, progression.steps) };
+  const goalLabel = (GOALS.find((g) => g.id === profile.goal) || {}).label || "-";
+  const levelLabel = (LEVELS.find((l) => l.id === profile.level) || {}).label || "-";
+  return (
+    <div className="fp-print-only">
+      <div style={{ marginBottom: 20 }}>
+        <div className="fp-display" style={{ fontSize: 30 }}>FITFORGE — โปรแกรมออกกำลังกายรายสัปดาห์</div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)" }}>
+          {profile.name ? `${profile.name} • ` : ""}เป้าหมาย: {goalLabel} • ระดับ: {levelLabel} • {plan.length} วัน/สัปดาห์ • {sr.sets} เซต x {sr.reps} ครั้ง • พัก {sr.restSec} วินาที
+        </div>
+      </div>
+      {plan.map((day) => (
+        <div key={day.dayIndex} className="fp-print-day">
+          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10, borderBottom: "2px solid var(--border)", paddingBottom: 6 }}>
+            {day.dayLabel} — {day.focus}
+          </div>
+          {day.exercises.map((exId) => {
+            const ex = EXERCISES.find((e) => e.id === exId);
+            if (!ex) return null;
+            const source = SOURCES.find((s) => s.id === ex.sourceId);
+            return (
+              <div key={exId} className="fp-ex-card" style={{ marginBottom: 10 }}>
+                <div style={{ fontWeight: 700, fontSize: 14.5 }}>{ex.name}</div>
+                <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>{ex.primary} • {sr.sets} เซต x {sr.reps} ครั้ง • พัก {sr.restSec} วินาที</div>
+                <ol style={{ fontSize: 11.5, margin: "4px 0", paddingLeft: 18, color: "var(--text-dim)" }}>
+                  {ex.how.map((s, i) => <li key={i}>{s}</li>)}
+                </ol>
+                <div style={{ fontSize: 11, color: "var(--warn)" }}>⚠ {ex.caution}</div>
+                {source && <div style={{ fontSize: 10, color: "var(--text-mute)", marginTop: 3 }}>อ้างอิง: {source.name} — {ex.sourceUrl}</div>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      <div style={{ fontSize: 10.5, color: "var(--text-mute)", marginTop: 20 }}>
+        ข้อมูลทั่วไปเพื่อการออกกำลังกาย ไม่ใช่คำแนะนำทางการแพทย์ ไม่วินิจฉัยหรือรักษาโรค โปรดปรึกษาแพทย์หรือผู้เชี่ยวชาญก่อนเริ่มโปรแกรมหากมีความเสี่ยงด้านสุขภาพ
+      </div>
+    </div>
+  );
+}
+
+function PlanView({ plan, aiMeta, aiStatus, activeDayIdx, setActiveDayIdx, onRegenerate, onMarkComplete, completedLog, profile, pool, onSwapExercise, onStartSession, adherenceStats }) {
+  if (!plan.length) {
+    return (
+      <div className="fp-fade-in fp-empty">
+        <Sparkles size={30} color="var(--text-mute)" />
+        <p style={{ marginTop: 10 }}>ยังไม่มีโปรแกรม ไปที่ Workout Setup เพื่อสร้างโปรแกรมด้วย AI ก่อน</p>
+      </div>
+    );
+  }
+  const day = plan[activeDayIdx] || plan[0];
+  const doneToday = completedLog.some((c) => c.dayIndex === day.dayIndex && isThisWeek(c.date));
+  const sr0 = (SET_REP_TABLE[profile.goal] && SET_REP_TABLE[profile.goal][profile.level]) || { sets: 3, reps: "10-12", restSec: 60 };
+  const progression = adherenceStats ? computeProgression(adherenceStats.streakWeeks) : { steps: 0, note: "" };
+  const sr = { ...sr0, reps: applyProgressionToReps(sr0.reps, progression.steps) };
+
+  return (
+    <React.Fragment>
+    <div className="fp-fade-in fp-print-hide">
+      <div className="fp-page-head">
+        <div><h1 className="fp-page-title">AI Workout Plan</h1><div className="fp-page-sub">โปรแกรมที่วิเคราะห์และจัดสรรให้เหมาะกับคุณโดยเฉพาะ</div></div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="fp-btn fp-btn-ghost fp-btn-sm" onClick={() => window.print()}>
+            <ExternalLink size={14} /> พิมพ์ / บันทึกเป็น PDF
+          </button>
+          <button className="fp-btn fp-btn-ghost fp-btn-sm" onClick={onRegenerate} disabled={aiStatus === "loading"}>
+            {aiStatus === "loading" ? <Loader2 size={14} className="fp-spin" /> : <RotateCcw size={14} />} สร้างใหม่
+          </button>
+        </div>
+      </div>
+
+      {aiMeta && (aiMeta.summary || aiMeta.rationale) && (
+        <div className="fp-ai-box" style={{ marginBottom: 20 }}>
+          <div className="fp-ai-head"><Sparkles size={14} /> สรุปโปรแกรมสำหรับคุณ</div>
+          {aiMeta.summary && <div className="fp-ai-summary">{aiMeta.summary}</div>}
+          {aiMeta.rationale && (
+            <div className="fp-ai-summary" style={{ marginTop: 8, color: "var(--text-dim)", fontSize: 13 }}>{aiMeta.rationale}</div>
+          )}
+          {aiMeta.tips && aiMeta.tips.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              {aiMeta.tips.map((t, i) => (
+                <div key={i} className="fp-ai-tip"><CheckCircle2 size={14} color="var(--success)" style={{ flexShrink: 0, marginTop: 2 }} /> {t}</div>
+              ))}
+            </div>
+          )}
+          {aiMeta.safetyNote && (
+            <div className="fp-ex-caution" style={{ marginTop: 12 }}><AlertTriangle size={14} /> {aiMeta.safetyNote}</div>
+          )}
+          <div className="fp-hint" style={{ marginTop: 10 }}>* สรุปนี้สร้างจากอัลกอริทึมในเว็บไซต์ทั้งหมด ไม่ได้เชื่อมต่อ AI ภายนอก เพื่อให้หน้านี้ทำงานได้แบบสแตนด์อโลนโดยไม่ต้องมี backend</div>
+        </div>
+      )}
+
+      {profile.hasLimitation && (
+        <div className="fp-ex-caution" style={{ marginBottom: 20 }}>
+          <ShieldAlert size={15} /> คุณระบุว่ามีข้อจำกัดทางร่างกาย ระบบเลี่ยงท่าที่มีความเสี่ยงสูงให้แล้ว แต่โปรดปรึกษาแพทย์หรือผู้เชี่ยวชาญก่อนเริ่มโปรแกรมนี้
+        </div>
+      )}
+
+      <div className="fp-tabbar">
+        {plan.map((d, i) => (
+          <div key={d.dayIndex} className={"fp-tab" + (i === activeDayIdx ? " active" : "")} onClick={() => setActiveDayIdx(i)}>{d.dayLabel}</div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 19, fontWeight: 700 }}>{day.focus}</div>
+          <div style={{ fontSize: 12.5, color: "var(--text-dim)" }}>{day.exercises.length} ท่า • {sr.sets} เซต x {sr.reps} ครั้ง • พัก {sr.restSec} วินาที</div>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="fp-btn fp-btn-soft fp-btn-sm" disabled={doneToday} onClick={() => onMarkComplete(day.dayIndex, day.dayLabel)}>
+            {doneToday ? (<><CheckCircle2 size={14} color="var(--success)" /> บันทึกแล้ว</>) : (<><Save size={14} /> บันทึก</>)}
+          </button>
+          {onStartSession && (
+            <button className="fp-btn fp-btn-primary fp-btn-sm" onClick={() => onStartSession(day.dayIndex)}>
+              <Play size={14} /> เริ่ม Workout
+            </button>
+          )}
+        </div>
+      </div>
+      {sr0.note && <div className="fp-hint">เหตุผลของจำนวนเซต/ครั้งนี้: {sr0.note}</div>}
+      {progression.steps > 0 && <div className="fp-hint" style={{ marginBottom: 16 }}>{progression.note}</div>}
+      {!progression.steps && <div style={{ marginBottom: 16 }} />}
+
+      <div className="fp-grid fp-grid-2">
+        {day.exercises.map((exId) => {
+          const ex = EXERCISES.find((e) => e.id === exId);
+          if (!ex) return null;
+          const alternatives = pool ? getSwapAlternatives(exId, pool, day.exercises) : [];
+          return (
+            <ExerciseCard
+              key={exId} ex={ex} sr={sr}
+              alternatives={onSwapExercise ? alternatives : null}
+              onSwap={onSwapExercise ? (newId) => onSwapExercise(day.dayIndex, exId, newId) : null}
+            />
+          );
+        })}
+      </div>
+
+      <div className="fp-card" style={{ marginTop: 20 }}>
+        <div className="fp-card-title"><ExternalLink size={13} /> แหล่งข้อมูลอ้างอิงทั้งหมดที่ใช้ในระบบ</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+          {SOURCES.map((s) => (
+            <a key={s.id} href={s.url} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: 12.5, color: "var(--text-dim)", textDecoration: "none", borderBottom: "1px dotted var(--border)", paddingBottom: 4, width: "fit-content" }}>
+              {s.name}
+            </a>
+          ))}
+        </div>
+      </div>
+    </div>
+    <PrintableWeeklyPlan plan={plan} profile={profile} adherenceStats={adherenceStats} />
+    </React.Fragment>
+  );
+}
+
+// ===================== WEEKLY SCHEDULE =====================
+function ScheduleView({ plan, setView, setActiveDayIdx }) {
+  if (!plan.length) {
+    return (
+      <div className="fp-fade-in fp-empty">
+        <CalendarDays size={30} color="var(--text-mute)" />
+        <p style={{ marginTop: 10 }}>ยังไม่มีตารางฝึก ไปที่ Workout Setup เพื่อสร้างโปรแกรมก่อน</p>
+      </div>
+    );
+  }
+  return (
+    <div className="fp-fade-in">
+      <div className="fp-page-head">
+        <div><h1 className="fp-page-title">Weekly Schedule</h1><div className="fp-page-sub">ภาพรวมตารางฝึกทั้งสัปดาห์ ({plan.length} วัน/สัปดาห์) — แตะเพื่อดูรายละเอียด</div></div>
+      </div>
+      <div className="fp-week-grid">
+        {plan.map((d, i) => (
+          <div key={d.dayIndex} className="fp-week-cell" onClick={() => { setActiveDayIdx(i); setView("plan"); }}>
+            <div className="fp-week-day">{d.dayLabel}</div>
+            <div className="fp-week-focus">{d.focus}</div>
+            <div className="fp-week-meta">{d.exercises.length} ท่า</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ===================== PROGRESS =====================
+function ProgressView({ progressLog, completedLog, weightInput, setWeightInput, onLogWeight, split, profile, exerciseLog, adherenceStats }) {
+  const [selectedExId, setSelectedExId] = useState("");
+  const chartData = progressLog.map((e) => ({ date: e.date.slice(5), weight: e.weight }));
+  const weekCompleted = completedLog.filter((c) => isThisWeek(c.date)).length;
+  const totalDays = split.length || Number(profile.daysPerWeek) || 0;
+  const pct = totalDays ? Math.min(100, Math.round((weekCompleted / totalDays) * 100)) : 0;
+
+  const loggedExIds = Array.from(new Set((exerciseLog || []).filter((e) => e.weightKg != null).map((e) => e.exerciseId)));
+  const activeExId = selectedExId && loggedExIds.includes(selectedExId) ? selectedExId : loggedExIds[0] || "";
+  const exChartData = (exerciseLog || [])
+    .filter((e) => e.exerciseId === activeExId && e.weightKg != null)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((e) => ({ date: e.date.slice(5), weight: e.weightKg }));
+  const target = Number(profile.daysPerWeek) || 3;
+
+  return (
+    <div className="fp-fade-in">
+      <div className="fp-page-head">
+        <div><h1 className="fp-page-title">Progress</h1><div className="fp-page-sub">ติดตามน้ำหนัก BMI ความสม่ำเสมอ และความสำเร็จของคุณ</div></div>
+      </div>
+
+      <div className="fp-grid fp-grid-3" style={{ marginBottom: 20 }}>
+        <div className="fp-card">
+          <div className="fp-card-title"><TrendingUp size={14} /> Workout สะสม</div>
+          <div className="fp-stat-num fp-mono">{completedLog.length}</div>
+          <div className="fp-stat-label">ครั้งทั้งหมด</div>
+        </div>
+        <div className="fp-card">
+          <div className="fp-card-title"><ClipboardList size={14} /> สัปดาห์นี้</div>
+          <div className="fp-stat-num fp-mono">{weekCompleted}<span style={{ fontSize: 15, color: "var(--text-mute)" }}>/{totalDays || "-"}</span></div>
+          <div className="fp-progress-track" style={{ marginTop: 10 }}><div className="fp-progress-fill" style={{ width: pct + "%" }} /></div>
+        </div>
+        <div className="fp-card">
+          <div className="fp-card-title"><Trophy size={14} /> สัปดาห์ต่อเนื่อง</div>
+          <div className="fp-stat-num fp-mono">{adherenceStats ? adherenceStats.streakWeeks : 0}</div>
+          <div className="fp-stat-label">Streak (เกณฑ์ ≥75% ของเป้าหมาย/สัปดาห์)</div>
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 20 }}>
+        <div className="fp-card-title"><Weight size={14} /> บันทึกน้ำหนักวันนี้</div>
+        <div style={{ display: "flex", gap: 8, maxWidth: 260 }}>
+          <input className="fp-input" type="number" placeholder="กก." value={weightInput} onChange={(e) => setWeightInput(e.target.value)} />
+          <button className="fp-btn fp-btn-primary" onClick={onLogWeight}><Plus size={15} /></button>
+        </div>
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 20 }}>
+        <div className="fp-card-title"><TrendingUp size={14} /> แนวโน้มน้ำหนัก (กก.)</div>
+        {chartData.length < 2 ? (
+          <div className="fp-empty" style={{ padding: "30px 10px" }}>บันทึกน้ำหนักอย่างน้อย 2 ครั้งเพื่อดูกราฟแนวโน้ม</div>
+        ) : (
+          <SimpleLineChart data={chartData} dataKey="weight" color="var(--accent)" height={260} />
+        )}
+      </div>
+
+      <div className="fp-card" style={{ marginBottom: 20 }}>
+        <div className="fp-card-title"><Dumbbell size={14} /> น้ำหนักที่ยกได้ต่อท่า</div>
+        {loggedExIds.length === 0 ? (
+          <div className="fp-empty" style={{ padding: "30px 10px" }}>เริ่ม Workout แบบมีไกด์แล้วบันทึกน้ำหนักที่ใช้ เพื่อดูกราฟความก้าวหน้าของแต่ละท่า</div>
+        ) : (
+          <>
+            <select className="fp-select" style={{ maxWidth: 320, marginBottom: 14 }} value={activeExId} onChange={(e) => setSelectedExId(e.target.value)}>
+              {loggedExIds.map((id) => {
+                const ex = EXERCISES.find((e) => e.id === id);
+                return <option key={id} value={id}>{ex ? ex.name : id}</option>;
+              })}
+            </select>
+            {exChartData.length < 2 ? (
+              <div className="fp-empty" style={{ padding: "20px 10px" }}>บันทึกน้ำหนักท่านี้อย่างน้อย 2 ครั้งเพื่อดูกราฟ</div>
+            ) : (
+              <SimpleLineChart data={exChartData} dataKey="weight" color="var(--success)" height={220} />
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="fp-card">
+        <div className="fp-card-title"><Trophy size={14} /> ความสำเร็จ</div>
+        <div className="fp-grid fp-grid-2">
+          {ACHIEVEMENTS.map((a) => {
+            const unlocked = adherenceStats ? a.check(adherenceStats, target) : false;
+            return (
+              <div key={a.id} className="fp-card" style={{ padding: 14, opacity: unlocked ? 1 : 0.4, display: "flex", gap: 12, alignItems: "center" }}>
+                <Trophy size={22} color={unlocked ? "var(--accent-2)" : "var(--text-mute)"} />
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 13.5 }}>{a.label}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-mute)" }}>{a.desc}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="fp-disclaimer">
+        <Info size={15} />
+        <span>กราฟและความสำเร็จเหล่านี้เป็นข้อมูลเพื่อการติดตามด้วยตนเองเท่านั้น ไม่ใช่การวินิจฉัยหรือประเมินผลลัพธ์ทางการแพทย์</span>
+      </div>
+    </div>
+  );
+}
+
+// ===================== GUIDED SESSION MODE =====================
+// Full-screen guided flow: warm-up -> per-exercise sets with a rest timer -> quick
+// log -> cool-down -> done. All numbers shown here (sets/reps/rest) still come from
+// the same sourced SET_REP_TABLE as the rest of the app; progressive overload only
+// nudges the displayed rep target, and pain-reporting only swaps/reduces — neither
+// ever invents a new exercise or a made-up number.
+function SessionView({ day, profile, pool, adherenceStats, onExit, onSwap, onLogExercise, onFlagPain, onFinish }) {
+  const [phase, setPhase] = useState(day.exercises.length === 0 ? "cooldown" : "warmup"); // warmup | exercise | rest | log | cooldown | done
+  const [stepIdx, setStepIdx] = useState(0); // warmup/cooldown move index
+  const [exIdx, setExIdx] = useState(0);
+  const [setNum, setSetNum] = useState(1);
+  const [secondsLeft, setSecondsLeft] = useState(day.exercises.length === 0 ? COOLDOWN_MOVES[0].seconds : WARMUP_MOVES[0].seconds);
+  const [running, setRunning] = useState(true);
+  const [showPainPanel, setShowPainPanel] = useState(false);
+  const [reducedIds, setReducedIds] = useState([]); // session-only rep reduction
+  const [logWeight, setLogWeight] = useState("");
+  const [confirmExit, setConfirmExit] = useState(false);
+
+  const sr0 = (SET_REP_TABLE[profile.goal] && SET_REP_TABLE[profile.goal][profile.level]) || { sets: 3, reps: "10-12", restSec: 60 };
+  const progression = computeProgression(adherenceStats.streakWeeks);
+  const currentExId = day.exercises[exIdx];
+  const currentEx = EXERCISES.find((e) => e.id === currentExId);
+  const isReduced = reducedIds.includes(currentExId);
+  const displayReps = isReduced
+    ? applyReduction(sr0.reps)
+    : applyProgressionToReps(sr0.reps, progression.steps);
+  const sr = { ...sr0, reps: displayReps };
+
+  useEffect(() => {
+    if (!running || secondsLeft <= 0) return;
+    const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [running, secondsLeft]);
+
+  useEffect(() => {
+    if (running && secondsLeft === 0 && (phase === "warmup" || phase === "rest" || phase === "cooldown")) {
+      advance();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secondsLeft, running, phase]);
+
+  function advance() {
+    if (phase === "warmup") {
+      if (stepIdx < WARMUP_MOVES.length - 1) {
+        setStepIdx(stepIdx + 1);
+        setSecondsLeft(WARMUP_MOVES[stepIdx + 1].seconds);
+      } else {
+        setPhase("exercise");
+        setRunning(false);
+      }
+    } else if (phase === "rest") {
+      setPhase("exercise");
+      setRunning(false);
+    } else if (phase === "cooldown") {
+      if (stepIdx < COOLDOWN_MOVES.length - 1) {
+        setStepIdx(stepIdx + 1);
+        setSecondsLeft(COOLDOWN_MOVES[stepIdx + 1].seconds);
+      } else {
+        setPhase("done");
+        setRunning(false);
+      }
+    }
+  }
+
+  function skipTimer() {
+    setSecondsLeft(0);
+    advance();
+  }
+
+  function completeSet() {
+    if (setNum < sr.sets) {
+      setSetNum(setNum + 1);
+      setPhase("rest");
+      setSecondsLeft(sr0.restSec);
+      setRunning(true);
+    } else {
+      setPhase("log");
+    }
+  }
+
+  function confirmLog() {
+    onLogExercise({
+      exerciseId: currentExId, dayIndex: day.dayIndex,
+      weightKg: logWeight ? Number(logWeight) : null, sets: sr.sets, reps: sr.reps,
+    });
+    setLogWeight("");
+    setSetNum(1);
+    if (exIdx < day.exercises.length - 1) {
+      setExIdx(exIdx + 1);
+      setPhase("exercise");
+    } else {
+      setStepIdx(0);
+      setSecondsLeft(COOLDOWN_MOVES[0].seconds);
+      setRunning(true);
+      setPhase("cooldown");
+    }
+  }
+
+  function handlePainSwap() {
+    const alts = getSwapAlternatives(currentExId, pool, day.exercises);
+    onFlagPain(currentExId);
+    if (alts.length > 0) {
+      onSwap(currentExId, alts[0].id);
+    }
+    setShowPainPanel(false);
+    setSetNum(1);
+    setPhase("exercise");
+    setRunning(false);
+  }
+  function handlePainReduce() {
+    onFlagPain(currentExId);
+    setReducedIds((r) => (r.includes(currentExId) ? r : [...r, currentExId]));
+    setShowPainPanel(false);
+  }
+
+  const totalSteps = 1 + day.exercises.length + 1; // warmup + exercises + cooldown, rough
+  const currentStepNum = phase === "warmup" ? 1 : phase === "cooldown" || phase === "done" ? totalSteps : 1 + exIdx + 1;
+
+  return (
+    <div className="fp-session">
+      <div className="fp-session-head">
+        {confirmExit ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: "var(--text-dim)" }}>ออกจากเซสชันเลย?</span>
+            <button className="fp-btn fp-btn-ghost fp-btn-sm" onClick={() => setConfirmExit(false)}>ยกเลิก</button>
+            <button className="fp-btn fp-btn-primary fp-btn-sm" onClick={onExit}>ออก</button>
+          </div>
+        ) : (
+          <button className="fp-session-exit" onClick={() => setConfirmExit(true)}><X size={16} /> ออก</button>
+        )}
+        <span className="fp-session-progress">{day.dayLabel} • {currentStepNum}/{totalSteps}</span>
+      </div>
+
+      {phase === "warmup" && (
+        <div className="fp-session-stage fp-fade-in">วอร์มอัพ</div>
+      )}
+      {(phase === "exercise" || phase === "rest" || phase === "log") && (
+        <div className="fp-session-stage fp-fade-in">ท่าที่ {exIdx + 1} จาก {day.exercises.length}</div>
+      )}
+      {phase === "cooldown" && <div className="fp-session-stage fp-fade-in">คูลดาวน์</div>}
+
+      {phase === "warmup" && (
+        <div className="fp-session-card fp-fade-in">
+          <div className="fp-session-icon-big"><PatternIcon pattern="dynamic" size={30} /></div>
+          <div className="fp-session-name">{WARMUP_MOVES[stepIdx].name}</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 13.5 }}>{WARMUP_MOVES[stepIdx].how}</div>
+          <div className="fp-timer-ring" style={{ background: `conic-gradient(var(--accent) ${(1 - secondsLeft / WARMUP_MOVES[stepIdx].seconds) * 360}deg, var(--surface-3) 0deg)` }}>
+            <div className="fp-timer-inner"><div className="fp-timer-num fp-mono">{secondsLeft}</div><div className="fp-timer-lbl">วินาที</div></div>
+          </div>
+          <button className="fp-btn fp-btn-ghost" onClick={skipTimer}><SkipForward size={15} /> ข้าม</button>
+        </div>
+      )}
+
+      {phase === "cooldown" && (
+        <div className="fp-session-card fp-fade-in">
+          <div className="fp-session-icon-big"><PatternIcon pattern="core" size={30} /></div>
+          <div className="fp-session-name">{COOLDOWN_MOVES[stepIdx].name}</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 13.5 }}>{COOLDOWN_MOVES[stepIdx].how}</div>
+          <div className="fp-timer-ring" style={{ background: `conic-gradient(var(--accent) ${(1 - secondsLeft / COOLDOWN_MOVES[stepIdx].seconds) * 360}deg, var(--surface-3) 0deg)` }}>
+            <div className="fp-timer-inner"><div className="fp-timer-num fp-mono">{secondsLeft}</div><div className="fp-timer-lbl">วินาที</div></div>
+          </div>
+          <button className="fp-btn fp-btn-ghost" onClick={skipTimer}><SkipForward size={15} /> ข้าม</button>
+        </div>
+      )}
+
+      {phase === "rest" && (
+        <div className="fp-session-card fp-fade-in">
+          <div className="fp-session-name">พักระหว่างเซต</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 13.5 }}>ท่าถัดไป: เซต {setNum}/{sr.sets} — {currentEx ? currentEx.name : ""}</div>
+          <div className="fp-timer-ring" style={{ background: `conic-gradient(var(--accent) ${(1 - secondsLeft / sr0.restSec) * 360}deg, var(--surface-3) 0deg)` }}>
+            <div className="fp-timer-inner"><div className="fp-timer-num fp-mono">{secondsLeft}</div><div className="fp-timer-lbl">วินาที</div></div>
+          </div>
+          <button className="fp-btn fp-btn-ghost" onClick={skipTimer}><SkipForward size={15} /> ข้ามพัก</button>
+        </div>
+      )}
+
+      {phase === "exercise" && currentEx && (
+        <div className="fp-session-card fp-fade-in">
+          <div className="fp-session-icon-big"><PatternIcon pattern={currentEx.pattern} size={30} /></div>
+          <div className="fp-session-name">{currentEx.name}</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 13 }}>{currentEx.primary}</div>
+          {isReduced && <span className="fp-badge fp-badge-warn">ลดจำนวนครั้งลงให้แล้ว</span>}
+          {!isReduced && progression.steps > 0 && <span className="fp-badge fp-badge-success">เพิ่มเป้าหมายขึ้นเล็กน้อย (ฝึกต่อเนื่อง {adherenceStats.streakWeeks} สัปดาห์)</span>}
+          <div className="fp-session-setinfo">
+            <div><div className="fp-num">{setNum}/{sr.sets}</div><div className="fp-lbl">เซต</div></div>
+            <div><div className="fp-num">{sr.reps}</div><div className="fp-lbl">ครั้ง</div></div>
+          </div>
+          <ol className="fp-ex-steps" style={{ textAlign: "left" }}>
+            {currentEx.how.map((s, i) => <li key={i}>{s}</li>)}
+          </ol>
+          <div className="fp-session-actions">
+            <button className="fp-btn fp-btn-primary fp-btn-block" onClick={completeSet}><CheckCircle2 size={16} /> ทำเซตนี้เสร็จแล้ว</button>
+            {!showPainPanel && <button className="fp-session-hurt" onClick={() => setShowPainPanel(true)}><AlertTriangle size={13} /> ท่านี้ทำให้เจ็บ?</button>}
+            {showPainPanel && (
+              <div className="fp-pain-panel fp-fade-in">
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>เจ็บตอนทำท่านี้ใช่ไหม? เลือกวิธีจัดการ:</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button className="fp-btn fp-btn-soft" onClick={handlePainSwap}><Repeat size={14} /> สลับเป็นท่าอื่นให้เลย</button>
+                  <button className="fp-btn fp-btn-soft" onClick={handlePainReduce}><Minus size={14} /> ลดจำนวนครั้งที่เหลือลงครึ่งหนึ่ง</button>
+                  <button className="fp-btn fp-btn-ghost fp-btn-sm" onClick={() => setShowPainPanel(false)}>ยกเลิก</button>
+                </div>
+                <div className="fp-hint" style={{ marginTop: 10 }}>ท่านี้จะถูกจดจำไว้ ระบบจะไม่แนะนำท่านี้ให้อีกในโปรแกรมถัดไป</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {phase === "log" && currentEx && (
+        <div className="fp-session-card fp-fade-in">
+          <CheckCircle2 size={34} color="var(--success)" />
+          <div className="fp-session-name">ทำ {currentEx.name} ครบแล้ว!</div>
+          <div style={{ fontSize: 13, color: "var(--text-dim)" }}>บันทึกน้ำหนักที่ใช้ (ถ้ามี) เพื่อดูกราฟความก้าวหน้าภายหลัง</div>
+          <div className="fp-log-row">
+            <div className="fp-field" style={{ marginBottom: 0, flex: 1 }}>
+              <label className="fp-label">น้ำหนักที่ใช้ (กก., ไม่บังคับ)</label>
+              <input className="fp-input" type="number" value={logWeight} onChange={(e) => setLogWeight(e.target.value)} placeholder="เช่น 10" />
+            </div>
+          </div>
+          <div className="fp-session-actions">
+            <button className="fp-btn fp-btn-primary fp-btn-block" onClick={confirmLog}>
+              {exIdx < day.exercises.length - 1 ? <>ท่าถัดไป <ChevronRight size={16} /></> : <>ไปคูลดาวน์ <ChevronRight size={16} /></>}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === "done" && (
+        <div className="fp-session-done fp-fade-in">
+          <Trophy size={48} color="var(--accent-2)" />
+          <div className="fp-page-title" style={{ fontSize: 28 }}>เยี่ยมมาก! จบ Workout แล้ว</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 14 }}>{day.dayLabel} — {day.exercises.length} ท่า เสร็จสมบูรณ์</div>
+          <button className="fp-btn fp-btn-primary" onClick={onFinish}><CheckCircle2 size={16} /> เสร็จสิ้น</button>
+        </div>
+      )}
+
+      <div className="fp-disclaimer" style={{ marginTop: 24 }}>
+        <Info size={15} />
+        <span>หากรู้สึกเจ็บผิดปกติ เวียนศีรษะ หรือแน่นหน้าอกระหว่างออกกำลังกาย ให้หยุดทันทีและปรึกษาแพทย์</span>
+      </div>
+    </div>
+  );
+}
+
+// ===================== WELCOME / ONBOARDING =====================
+// Not a real authentication system — there is no backend here to verify a
+// password against, and each person's data is already private to their own
+// account via window.storage. This is a one-time "welcome" gate that just
+// personalizes the app and marks onboarding as done.
+function LoginView({ onContinue }) {
+  const [name, setName] = useState("");
+  return (
+    <div className="fp-login-shell">
+      <div className="fp-login-card fp-fade-in">
+        <div className="fp-login-mark"><Dumbbell size={28} /></div>
+        <div className="fp-login-title">FITFORGE</div>
+        <div className="fp-login-sub">ผู้ช่วยวางแผนออกกำลังกายส่วนบุคคลด้วย AI<br />พร้อมโปรแกรม วอร์มอัพ และติดตามความก้าวหน้าครบวงจร</div>
+        <div className="fp-field">
+          <label className="fp-label">ชื่อเล่นของคุณ (ไม่บังคับ)</label>
+          <input
+            className="fp-input" value={name} placeholder="เช่น ต้น"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onContinue(name); }}
+          />
+        </div>
+        <button className="fp-btn fp-btn-primary fp-btn-block" onClick={() => onContinue(name)}>
+          เริ่มต้นใช้งาน <ChevronRight size={16} />
+        </button>
+        <div className="fp-hint" style={{ textAlign: "center", marginTop: 16, lineHeight: 1.6 }}>
+          ข้อมูลของคุณถูกเก็บไว้ในบัญชีนี้เท่านั้น ไม่มีการแชร์หรือแสดงให้ผู้อื่นเห็น
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function FitnessPlanner() {
+  const [view, setView] = useState("dashboard");
+  const [profile, setProfile] = useState(EMPTY_PROFILE);
+  const [draftProfile, setDraftProfile] = useState(EMPTY_PROFILE);
+  const [loaded, setLoaded] = useState(false);
+  const [onboarded, setOnboarded] = useState(false); // overwritten once storage load resolves; loading spinner masks this either way
+  const [split, setSplit] = useState([]);
+  const [plan, setPlan] = useState([]);
+  const [aiMeta, setAiMeta] = useState(null);
+  const [aiStatus, setAiStatus] = useState("idle");
+  const [activeDayIdx, setActiveDayIdx] = useState(0);
+  const [progressLog, setProgressLog] = useState([]);
+  const [completedLog, setCompletedLog] = useState([]);
+  const [exerciseLog, setExerciseLog] = useState([]);
+  const [avoidList, setAvoidList] = useState([]);
+  const [sessionDayIdx, setSessionDayIdx] = useState(null);
+  const [toast, setToast] = useState("");
+  const [weightInput, setWeightInput] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const [p, ps, pl, cl, el, al, ob] = await Promise.all([
+        loadKey("fp-profile", EMPTY_PROFILE),
+        loadKey("fp-plan-state", null),
+        loadKey("fp-progress-log", []),
+        loadKey("fp-completed-log", []),
+        loadKey("fp-exercise-log", []),
+        loadKey("fp-avoid-list", []),
+        loadKey("fp-onboarded", false),
+      ]);
+      // Merge over EMPTY_PROFILE so a profile saved by an older version of this
+      // app (missing newer fields like "equipment") never leaves a field undefined.
+      const mergedProfile = { ...EMPTY_PROFILE, ...p };
+      setProfile(mergedProfile);
+      setDraftProfile(mergedProfile);
+      if (ps) {
+        setSplit(ps.split || []);
+        setPlan(ps.plan || []);
+        setAiMeta(ps.aiMeta || null);
+        setAiStatus(ps.plan && ps.plan.length ? (ps.aiMeta && ps.aiMeta.rationale ? "done" : "error") : "idle");
+      }
+      setProgressLog(pl || []);
+      setCompletedLog(cl || []);
+      setExerciseLog(el || []);
+      setAvoidList(al || []);
+      // A profile saved before this welcome screen existed already counts as
+      // "onboarded" — don't make a returning user re-enter their name.
+      setOnboarded(!!ob || !!(p && p.name));
+      setLoaded(true);
+    })();
+  }, []);
+
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(""), 2200);
+  }, []);
+
+  const bmi = useMemo(() => calcBMI(profile.height, profile.weight), [profile.height, profile.weight]);
+  const bmiCat = useMemo(() => bmiCategory(bmi), [bmi]);
+  const missing = useMemo(() => validateProfile(profile), [profile]);
+  const isProfileComplete = missing.length === 0;
+
+  async function handleSaveProfile(next) {
+    setProfile(next);
+    setDraftProfile(next);
+    await saveKey("fp-profile", next);
+  }
+
+  async function handleOnboard(name) {
+    const trimmed = (name || "").trim();
+    if (trimmed) {
+      const next = { ...profile, name: trimmed };
+      setProfile(next);
+      setDraftProfile(next);
+      await saveKey("fp-profile", next);
+    }
+    setOnboarded(true);
+    await saveKey("fp-onboarded", true);
+  }
+
+  async function generateProgram() {
+    const missingNow = validateProfile(profile);
+    if (missingNow.length > 0) {
+      showToast("กรอกข้อมูลให้ครบก่อนสร้างโปรแกรม");
+      setView("setup");
+      return;
+    }
+    setAiStatus("loading");
+    const newSplit = buildSplit(Number(profile.daysPerWeek), profile.bodyParts);
+    const pool = getEligibleExercises(profile.bodyParts, profile.level, profile.hasLimitation, profile.equipment, avoidList);
+    const perDay = exercisesPerDay(profile.duration);
+
+    const finalPlan = newSplit.map((day) => ({
+      dayIndex: day.dayIndex, dayLabel: day.dayLabel, focus: day.focus,
+      exercises: pickExercisesForDay(pool, day.parts, perDay, day.dayIndex).map((ex) => ex.id),
+    }));
+    const sr = (SET_REP_TABLE[profile.goal] && SET_REP_TABLE[profile.goal][profile.level]) || { sets: 3, reps: "10-12", restSec: 60 };
+    const meta = generateLocalSummary(profile, finalPlan, sr, newSplit);
+
+    setSplit(newSplit);
+    setPlan(finalPlan);
+    setAiMeta(meta);
+    setAiStatus("done");
+    await saveKey("fp-plan-state", { split: newSplit, plan: finalPlan, aiMeta: meta, generatedAt: new Date().toISOString() });
+    setActiveDayIdx(0);
+    setView("plan");
+  }
+
+  async function handleLogWeight() {
+    const w = Number(weightInput);
+    if (!w || w < 20 || w > 300) { showToast("กรอกน้ำหนักให้ถูกต้อง"); return; }
+    const entry = { date: new Date().toISOString().slice(0, 10), weight: w };
+    const next = [...progressLog.filter((e) => e.date !== entry.date), entry].sort((a, b) => a.date.localeCompare(b.date));
+    setProgressLog(next);
+    await saveKey("fp-progress-log", next);
+    const nextProfile = { ...profile, weight: w };
+    setProfile(nextProfile);
+    setDraftProfile(nextProfile);
+    await saveKey("fp-profile", nextProfile);
+    setWeightInput("");
+    showToast("บันทึกน้ำหนักแล้ว");
+  }
+
+  async function handleMarkComplete(dayIndex, dayLabel) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (completedLog.some((c) => c.date === today && c.dayIndex === dayIndex)) {
+      showToast("บันทึกไว้แล้วสำหรับวันนี้");
+      return;
+    }
+    const next = [...completedLog, { date: today, dayIndex, dayLabel }];
+    setCompletedLog(next);
+    await saveKey("fp-completed-log", next);
+    showToast("บันทึก Workout สำเร็จ");
+  }
+
+  // ---- exercise swap (used in Plan view and mid-session) ----
+  async function handleSwapExercise(dayIndex, oldId, newId) {
+    const nextPlan = plan.map((d) => (d.dayIndex === dayIndex ? { ...d, exercises: d.exercises.map((id) => (id === oldId ? newId : id)) } : d));
+    setPlan(nextPlan);
+    await saveKey("fp-plan-state", { split, plan: nextPlan, aiMeta, generatedAt: new Date().toISOString() });
+  }
+
+  // ---- pain flag: permanently avoid the exercise in future auto-generated plans ----
+  async function handleFlagPain(exerciseId) {
+    if (avoidList.includes(exerciseId)) return;
+    const next = [...avoidList, exerciseId];
+    setAvoidList(next);
+    await saveKey("fp-avoid-list", next);
+  }
+
+  // ---- per-exercise weight/reps logging (from Session mode) ----
+  async function handleLogExercise(entry) {
+    const next = [...exerciseLog, { ...entry, date: new Date().toISOString().slice(0, 10) }];
+    setExerciseLog(next);
+    await saveKey("fp-exercise-log", next);
+  }
+
+  // ---- finish a guided session: mark day complete + close session, with an
+  // achievement toast if this session unlocked a new one ----
+  async function handleFinishSession(dayIndex, dayLabel) {
+    const beforeStats = computeAdherenceStats(completedLog, profile.daysPerWeek);
+    const beforeUnlocked = new Set(ACHIEVEMENTS.filter((a) => a.check(beforeStats, Number(profile.daysPerWeek))).map((a) => a.id));
+    const today = new Date().toISOString().slice(0, 10);
+    let nextCompleted = completedLog;
+    if (!completedLog.some((c) => c.date === today && c.dayIndex === dayIndex)) {
+      nextCompleted = [...completedLog, { date: today, dayIndex, dayLabel }];
+      setCompletedLog(nextCompleted);
+      await saveKey("fp-completed-log", nextCompleted);
+    }
+    const afterStats = computeAdherenceStats(nextCompleted, profile.daysPerWeek);
+    const newlyUnlocked = ACHIEVEMENTS.find((a) => !beforeUnlocked.has(a.id) && a.check(afterStats, Number(profile.daysPerWeek)));
+    setSessionDayIdx(null);
+    showToast(newlyUnlocked ? `ปลดล็อกความสำเร็จ: ${newlyUnlocked.label}!` : "จบ Workout แล้ว เก่งมาก!");
+  }
+
+  const pool = useMemo(
+    () => getEligibleExercises(profile.bodyParts, profile.level, profile.hasLimitation, profile.equipment, avoidList),
+    [profile.bodyParts, profile.level, profile.hasLimitation, profile.equipment, avoidList]
+  );
+  const adherenceStats = useMemo(() => computeAdherenceStats(completedLog, profile.daysPerWeek), [completedLog, profile.daysPerWeek]);
+
+  if (!loaded) {
+    return (
+      <div className="fp-root" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <style>{GLOBAL_STYLES}</style>
+        <Loader2 className="fp-spin" size={28} color="var(--accent)" />
+      </div>
+    );
+  }
+
+  if (!onboarded) {
+    return (
+      <div className="fp-root">
+        <style>{GLOBAL_STYLES}</style>
+        <LoginView onContinue={handleOnboard} />
+      </div>
+    );
+  }
+
+  if (sessionDayIdx !== null) {
+    const sessionDay = plan.find((d) => d.dayIndex === sessionDayIdx);
+    if (sessionDay) {
+      return (
+        <div className="fp-root">
+          <style>{GLOBAL_STYLES}</style>
+          <SessionView
+            day={sessionDay} profile={profile} pool={pool} adherenceStats={adherenceStats}
+            onExit={() => setSessionDayIdx(null)}
+            onSwap={(oldId, newId) => handleSwapExercise(sessionDay.dayIndex, oldId, newId)}
+            onLogExercise={handleLogExercise}
+            onFlagPain={handleFlagPain}
+            onFinish={() => handleFinishSession(sessionDay.dayIndex, sessionDay.dayLabel)}
+          />
+        </div>
+      );
+    }
+    setSessionDayIdx(null);
+  }
+
+  return (
+    <div className="fp-root">
+      <style>{GLOBAL_STYLES}</style>
+      <div className="fp-shell">
+        <Sidebar view={view} setView={setView} />
+        <main className="fp-main">
+          {view === "dashboard" && (
+            <DashboardView
+              profile={profile} bmi={bmi} bmiCat={bmiCat} isProfileComplete={isProfileComplete}
+              plan={plan} split={split} completedLog={completedLog} setView={setView}
+              onMarkComplete={handleMarkComplete} onStartSession={setSessionDayIdx}
+              adherenceStats={adherenceStats}
+            />
+          )}
+          {view === "profile" && (
+            <ProfileView draft={draftProfile} setDraft={setDraftProfile} onSave={handleSaveProfile} bmi={bmi} bmiCat={bmiCat} showToast={showToast} />
+          )}
+          {view === "setup" && (
+            <SetupView
+              draft={draftProfile} setDraft={setDraftProfile} onSave={handleSaveProfile}
+              onGenerate={generateProgram} aiStatus={aiStatus} missing={missing}
+            />
+          )}
+          {view === "plan" && (
+            <PlanView
+              plan={plan} aiMeta={aiMeta} aiStatus={aiStatus}
+              activeDayIdx={activeDayIdx} setActiveDayIdx={setActiveDayIdx}
+              onRegenerate={generateProgram} onMarkComplete={handleMarkComplete}
+              completedLog={completedLog} profile={profile} pool={pool}
+              onSwapExercise={handleSwapExercise} onStartSession={setSessionDayIdx}
+              adherenceStats={adherenceStats}
+            />
+          )}
+          {view === "schedule" && (
+            <ScheduleView plan={plan} setView={setView} setActiveDayIdx={setActiveDayIdx} />
+          )}
+          {view === "progress" && (
+            <ProgressView
+              progressLog={progressLog} completedLog={completedLog} weightInput={weightInput}
+              setWeightInput={setWeightInput} onLogWeight={handleLogWeight} split={split} profile={profile}
+              exerciseLog={exerciseLog} adherenceStats={adherenceStats}
+            />
+          )}
+        </main>
+      </div>
+      <BottomNav view={view} setView={setView} />
+      {toast && <div className="fp-toast fp-fade-in"><CheckCircle2 size={15} color="var(--success)" />{toast}</div>}
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")).render(<FitnessPlanner />);
+</script>
+
+<script>
+(function () {
+  var source = document.getElementById("fitforge-source").textContent;
+  var result = Babel.transform(source, {
+    presets: [["react", { runtime: "classic" }]],
+    filename: "fitforge.jsx",
+  });
+  var runScript = document.createElement("script");
+  runScript.textContent = result.code;
+  document.body.appendChild(runScript);
+})();
+</script>
+</body>
+</html>
